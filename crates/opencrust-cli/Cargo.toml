@@ -33,6 +33,7 @@ serde = { workspace = true }
 dirs = "6"
 regex = { workspace = true }
 ring = { workspace = true }
+colored = "3"
 
 [dev-dependencies]
 cargo-husky = { version = "1", default-features = false, features = ["precommit-hook", "run-cargo-fmt"] }

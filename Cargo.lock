@@ -2374,6 +2374,7 @@ dependencies = [
  "anyhow",
  "cargo-husky",
  "clap",
+ "colored",
  "daemonize",
  "dialoguer",
  "dirs",

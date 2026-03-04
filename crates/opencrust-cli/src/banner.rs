@@ -1,5 +1,6 @@
 use std::path::Path;
 
+use colored::Colorize;
 use opencrust_config::AppConfig;
 
 /// Print the startup banner with Ferris and config summary.
@@ -68,29 +69,34 @@ pub fn print_banner(host: &str, port: u16, config: &AppConfig, config_dir: &Path
 
     let row = |l: &str, r: &str| format!("│ {:<left_w$}│  {:<right_w$}│", l, r);
 
-    println!("{top}");
-    println!("{}", row("", ""));
-    println!("{}", row("  Welcome to OpenCrust!", "Gateway"));
-    println!("{}", row("", &url));
-    println!("{}", row("      _~^~^~_", &"─".repeat(right_w - 2)));
+    let o = |s: String| s.truecolor(255, 140, 0).to_string();
+
+    println!("{}", o(top));
+    println!("{}", o(row("", "")));
+    println!("{}", o(row("  Welcome to OpenCrust!", "Gateway")));
+    println!("{}", o(row("", &url)));
+    println!("{}", o(row("      _~^~^~_", &"─".repeat(right_w - 2))));
     println!(
         "{}",
-        row("  \\) /  o o  \\ (/", &format!("Provider    {provider}"))
+        o(row(
+            "  \\) /  o o  \\ (/",
+            &format!("Provider    {provider}")
+        ))
     );
     println!(
         "{}",
-        row("    '_   -   _'", &format!("Channels    {channels}"))
+        o(row("    '_   -   _'", &format!("Channels    {channels}")))
     );
     println!(
         "{}",
-        row("    / '-----' \\", &format!("Skills      {skills}"))
+        o(row("    / '-----' \\", &format!("Skills      {skills}")))
     );
-    println!("{}", row("", &format!("MCP         {mcp}")));
-    println!("{}", row("  Rust · Personal AI", ""));
+    println!("{}", o(row("", &format!("MCP         {mcp}"))));
+    println!("{}", o(row("  Rust · Personal AI", "")));
     println!(
         "{}",
-        row(&format!("  {dir_display}"), "Press Ctrl+C to stop")
+        o(row(&format!("  {dir_display}"), "Press Ctrl+C to stop"))
     );
-    println!("{}", row("", ""));
-    println!("{bottom}");
+    println!("{}", o(row("", "")));
+    println!("{}", o(bottom));
 }
