@@ -524,19 +524,22 @@ pub fn build_agent_runtime(config: &AppConfig) -> AgentRuntime {
 
 /// Build MCP tools from merged config (config.yml + mcp.json).
 ///
-/// Returns the manager and a flat list of bridged tools ready for registration.
-pub async fn build_mcp_tools(config: &AppConfig) -> (McpManager, Vec<Box<dyn Tool>>) {
+/// Returns the Arc-wrapped manager, a flat list of bridged tools (including
+/// the resource tool), and an optional instructions string from server handshakes.
+pub async fn build_mcp_tools(
+    config: &AppConfig,
+) -> (Arc<McpManager>, Vec<Box<dyn Tool>>, Option<String>) {
     let loader = match opencrust_config::ConfigLoader::new() {
         Ok(l) => l,
         Err(e) => {
             warn!("failed to create config loader for MCP: {e}");
-            return (McpManager::new(), Vec::new());
+            return (Arc::new(McpManager::new()), Vec::new(), None);
         }
     };
 
     let mcp_configs = loader.merged_mcp_config(config);
     if mcp_configs.is_empty() {
-        return (McpManager::new(), Vec::new());
+        return (Arc::new(McpManager::new()), Vec::new(), None);
     }
 
     let manager = McpManager::new();
@@ -563,7 +566,6 @@ pub async fn build_mcp_tools(config: &AppConfig) -> (McpManager, Vec<Box<dyn Too
                     )
                     .await
             }
-            #[cfg(feature = "mcp-http")]
             "http" => {
                 let Some(url) = &server_config.url else {
                     warn!(
@@ -593,7 +595,25 @@ pub async fn build_mcp_tools(config: &AppConfig) -> (McpManager, Vec<Box<dyn Too
         }
     }
 
-    (manager, all_tools)
+    // Collect server instructions
+    let all_instructions = manager.get_all_instructions().await;
+    let instructions_text = if all_instructions.is_empty() {
+        None
+    } else {
+        let mut text = "MCP server instructions:\n".to_string();
+        for (server_name, inst) in &all_instructions {
+            text.push_str(&format!("\n[{server_name}]: {inst}\n"));
+        }
+        Some(text)
+    };
+
+    // Arc-wrap the manager and add the resource tool
+    let manager = Arc::new(manager);
+    all_tools.push(Box::new(opencrust_agents::McpResourceTool::new(
+        Arc::clone(&manager),
+    )));
+
+    (manager, all_tools, instructions_text)
 }
 
 /// Build configured channels that can be initialized before state is wrapped in Arc.

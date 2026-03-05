@@ -57,6 +57,19 @@ impl AgentRuntime {
         self.system_prompt = Some(prompt);
     }
 
+    /// Append text to the existing system prompt (or create one if none exists).
+    pub fn append_system_prompt(&mut self, text: &str) {
+        match &mut self.system_prompt {
+            Some(existing) => {
+                existing.push_str("\n\n");
+                existing.push_str(text);
+            }
+            None => {
+                self.system_prompt = Some(text.to_string());
+            }
+        }
+    }
+
     /// Set the DNA content (personality/tone from dna.md). Uses `&self` via RwLock
     /// so it works after Arc wrapping for hot-reload.
     pub fn set_dna_content(&self, content: Option<String>) {

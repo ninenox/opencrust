@@ -55,8 +55,10 @@ enum ConnectionParams {
         env: HashMap<String, String>,
         timeout_secs: u64,
     },
-    #[cfg(feature = "mcp-http")]
-    Http { url: String, timeout_secs: u64 },
+    Http {
+        url: String,
+        timeout_secs: u64,
+    },
 }
 
 /// A live connection to one MCP server.
@@ -64,6 +66,7 @@ struct McpConnection {
     server_name: String,
     service: RunningService<RoleClient, ()>,
     tools: Vec<McpToolInfo>,
+    instructions: Option<String>,
     params: ConnectionParams,
 }
 
@@ -127,6 +130,12 @@ impl McpManager {
             })
             .collect();
 
+        // Capture server instructions from handshake
+        let instructions = service
+            .peer()
+            .peer_info()
+            .and_then(|info| info.instructions.clone());
+
         info!(
             "MCP server '{name}' connected: {} tool(s) discovered",
             tools.len()
@@ -134,11 +143,15 @@ impl McpManager {
         for tool in &tools {
             info!("  -> {name}.{}", tool.name);
         }
+        if instructions.is_some() {
+            info!("MCP server '{name}' provided instructions");
+        }
 
         let conn = McpConnection {
             server_name: name.to_string(),
             service,
             tools,
+            instructions,
             params: ConnectionParams::Stdio {
                 command: command.to_string(),
                 args: args.to_vec(),
@@ -155,7 +168,6 @@ impl McpManager {
     }
 
     /// Connect to an MCP server via HTTP (Streamable HTTP transport).
-    #[cfg(feature = "mcp-http")]
     pub async fn connect_http(&self, name: &str, url: &str, timeout_secs: u64) -> Result<()> {
         use rmcp::transport::StreamableHttpClientTransport;
 
@@ -184,15 +196,24 @@ impl McpManager {
             })
             .collect();
 
+        let instructions = service
+            .peer()
+            .peer_info()
+            .and_then(|info| info.instructions.clone());
+
         info!(
             "MCP server '{name}' connected via HTTP: {} tool(s) discovered",
             tools.len()
         );
+        if instructions.is_some() {
+            info!("MCP server '{name}' provided instructions");
+        }
 
         let conn = McpConnection {
             server_name: name.to_string(),
             service,
             tools,
+            instructions,
             params: ConnectionParams::Http {
                 url: url.to_string(),
                 timeout_secs,
@@ -299,10 +320,7 @@ impl McpManager {
             .get(name)
             .ok_or_else(|| Error::Mcp(format!("MCP server '{name}' not connected")))?;
 
-        let params = rmcp::model::ReadResourceRequestParams {
-            meta: None,
-            uri: uri.to_string(),
-        };
+        let params = rmcp::model::ReadResourceRequestParams::new(uri.to_string());
 
         let result = conn.service.read_resource(params).await.map_err(|e| {
             Error::Mcp(format!(
@@ -366,11 +384,10 @@ impl McpManager {
             .get(name)
             .ok_or_else(|| Error::Mcp(format!("MCP server '{name}' not connected")))?;
 
-        let params = rmcp::model::GetPromptRequestParams {
-            meta: None,
-            name: prompt_name.to_string(),
-            arguments: args,
-        };
+        let mut params = rmcp::model::GetPromptRequestParams::new(prompt_name.to_string());
+        if let Some(a) = args {
+            params = params.with_arguments(a);
+        }
 
         let result = conn.service.get_prompt(params).await.map_err(|e| {
             Error::Mcp(format!(
@@ -395,6 +412,37 @@ impl McpManager {
             .collect();
 
         Ok(messages)
+    }
+
+    /// Return instructions from all connected servers that provided them.
+    pub async fn get_all_instructions(&self) -> Vec<(String, String)> {
+        let conns = self.connections.read().await;
+        conns
+            .iter()
+            .filter_map(|(name, conn)| {
+                conn.instructions
+                    .as_ref()
+                    .map(|inst| (name.clone(), inst.clone()))
+            })
+            .collect()
+    }
+
+    /// List resources from all connected MCP servers.
+    pub async fn list_all_resources(&self) -> Vec<(String, Vec<McpResourceInfo>)> {
+        let server_names: Vec<String> = {
+            let conns = self.connections.read().await;
+            conns.keys().cloned().collect()
+        };
+        let mut results = Vec::new();
+        for name in server_names {
+            match self.list_resources(&name).await {
+                Ok(resources) if !resources.is_empty() => {
+                    results.push((name, resources));
+                }
+                _ => {}
+            }
+        }
+        results
     }
 
     /// Spawn a background health monitor that pings servers and reconnects on failure.
@@ -432,7 +480,6 @@ impl McpManager {
                     ref env,
                     timeout_secs,
                 } => self.connect(&name, command, args, env, timeout_secs).await,
-                #[cfg(feature = "mcp-http")]
                 ConnectionParams::Http {
                     ref url,
                     timeout_secs,

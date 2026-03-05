@@ -25,4 +25,4 @@ pub use tools::{
 };
 
 #[cfg(feature = "mcp")]
-pub use mcp::{McpManager, McpPromptInfo, McpResourceInfo, McpToolInfo};
+pub use mcp::{McpManager, McpPromptInfo, McpResourceInfo, McpResourceTool, McpToolInfo};

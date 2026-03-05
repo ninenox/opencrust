@@ -2369,7 +2369,7 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "opencrust"
-version = "0.1.19"
+version = "0.1.20"
 dependencies = [
  "anyhow",
  "cargo-husky",
@@ -2402,7 +2402,7 @@ dependencies = [
 
 [[package]]
 name = "opencrust-agents"
-version = "0.1.19"
+version = "0.1.20"
 dependencies = [
  "async-trait",
  "axum",
@@ -2428,7 +2428,7 @@ dependencies = [
 
 [[package]]
 name = "opencrust-channels"
-version = "0.1.19"
+version = "0.1.20"
 dependencies = [
  "async-trait",
  "axum",
@@ -2451,7 +2451,7 @@ dependencies = [
 
 [[package]]
 name = "opencrust-common"
-version = "0.1.19"
+version = "0.1.20"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2465,7 +2465,7 @@ dependencies = [
 
 [[package]]
 name = "opencrust-config"
-version = "0.1.19"
+version = "0.1.20"
 dependencies = [
  "dirs",
  "notify",
@@ -2481,7 +2481,7 @@ dependencies = [
 
 [[package]]
 name = "opencrust-db"
-version = "0.1.19"
+version = "0.1.20"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2500,7 +2500,7 @@ dependencies = [
 
 [[package]]
 name = "opencrust-gateway"
-version = "0.1.19"
+version = "0.1.20"
 dependencies = [
  "axum",
  "base64",
@@ -2534,7 +2534,7 @@ dependencies = [
 
 [[package]]
 name = "opencrust-media"
-version = "0.1.19"
+version = "0.1.20"
 dependencies = [
  "bytes",
  "opencrust-common",
@@ -2547,7 +2547,7 @@ dependencies = [
 
 [[package]]
 name = "opencrust-plugins"
-version = "0.1.19"
+version = "0.1.20"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2566,7 +2566,7 @@ dependencies = [
 
 [[package]]
 name = "opencrust-security"
-version = "0.1.19"
+version = "0.1.20"
 dependencies = [
  "base64",
  "keyring",
@@ -2583,7 +2583,7 @@ dependencies = [
 
 [[package]]
 name = "opencrust-skills"
-version = "0.1.19"
+version = "0.1.20"
 dependencies = [
  "opencrust-common",
  "reqwest 0.12.28",
@@ -3264,9 +3264,9 @@ dependencies = [
 
 [[package]]
 name = "rmcp"
-version = "0.16.0"
+version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cc4c9c94680f75470ee8083a0667988b5d7b5beb70b9f998a8e51de7c682ce60"
+checksum = "d2cb14cb9278a12eae884c9f3c0cfeca2cc28f361211206424a1d7abed95f090"
 dependencies = [
  "async-trait",
  "base64",
@@ -3291,9 +3291,9 @@ dependencies = [
 
 [[package]]
 name = "rmcp-macros"
-version = "0.16.0"
+version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "90c23c8f26cae4da838fbc3eadfaecf2d549d97c04b558e7bd90526a9c28b42a"
+checksum = "6a02ea81d9482b07e1fe156ac7cf98b6823d51fb84531936a5e1cbb4eec31ad5"
 dependencies = [
  "darling 0.23.0",
  "proc-macro2",

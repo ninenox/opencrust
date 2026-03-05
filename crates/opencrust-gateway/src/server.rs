@@ -38,14 +38,19 @@ impl GatewayServer {
         let mut agents = build_agent_runtime(&self.config);
 
         // Connect MCP servers and register their tools
-        let (mcp_manager, mcp_tools) = build_mcp_tools(&self.config).await;
+        let (mcp_manager_arc, mcp_tools, mcp_instructions) = build_mcp_tools(&self.config).await;
         for tool in mcp_tools {
             agents.register_tool(tool);
         }
 
+        // Append MCP server instructions to the system prompt
+        if let Some(instructions) = &mcp_instructions {
+            agents.append_system_prompt(instructions);
+        }
+
         let channels = build_channels(&self.config).await;
         let mut state = AppState::new(self.config, agents, channels);
-        state.mcp_manager = Some(mcp_manager);
+        state.mcp_manager_arc = Some(Arc::clone(&mcp_manager_arc));
 
         // Initialize persistent session storage used by channel memory bus hydration.
         let data_dir = state
@@ -103,11 +108,8 @@ impl GatewayServer {
             }
         }
 
-        // Wrap MCP manager in Arc for health monitor before moving into state
-        let mcp_manager_arc = state.mcp_manager.take().map(Arc::new);
-        if let Some(ref arc) = mcp_manager_arc {
-            state.mcp_manager_arc = Some(Arc::clone(arc));
-        }
+        // Reference the Arc-wrapped MCP manager for health monitoring
+        let mcp_manager_arc = state.mcp_manager_arc.clone();
 
         // Warn early if no gateway API key is set - Google integration endpoints
         // will reject requests with 403.
@@ -279,9 +281,6 @@ impl GatewayServer {
 
         // Disconnect MCP servers on shutdown
         if let Some(ref manager) = state_for_shutdown.mcp_manager_arc {
-            info!("disconnecting MCP servers...");
-            manager.disconnect_all().await;
-        } else if let Some(ref manager) = state_for_shutdown.mcp_manager {
             info!("disconnecting MCP servers...");
             manager.disconnect_all().await;
         }

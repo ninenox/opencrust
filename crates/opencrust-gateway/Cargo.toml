@@ -34,10 +34,6 @@ notify = "7"
 governor = "0.8"
 tower_governor = "0.8"
 
-[features]
-default = []
-mcp-http = ["opencrust-agents/mcp-http"]
-
 [dev-dependencies]
 wiremock = "0.6"
 tokio-tungstenite = "0.26"
