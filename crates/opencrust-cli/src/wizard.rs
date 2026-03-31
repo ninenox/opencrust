@@ -143,7 +143,8 @@ async fn validate_llm_key(provider: &str, api_key: &str, base_url: Option<&str>)
                 .send()
                 .await?;
             let status = resp.status().as_u16();
-            status == 200
+            // 200 = ok, 401 = server reachable but key required
+            status == 200 || status == 401
         }
         _ => {
             // Unknown provider - skip validation
