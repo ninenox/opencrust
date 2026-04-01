@@ -1,6 +1,7 @@
 use std::path::Path;
 
 use anyhow::Result;
+use colored::Colorize;
 use opencrust_config::AppConfig;
 
 // ---------------------------------------------------------------------------
@@ -17,10 +18,10 @@ enum Check {
 impl Check {
     fn print(&self, label: &str) {
         match self {
-            Check::Pass(msg) => println!("  [pass] {label}: {msg}"),
-            Check::Fail(msg) => println!("  [FAIL] {label}: {msg}"),
-            Check::Warn(msg) => println!("  [warn] {label}: {msg}"),
-            Check::Skip(msg) => println!("  [skip] {label}: {msg}"),
+            Check::Pass(msg) => println!("  {} {label}: {msg}", "[pass]".green()),
+            Check::Fail(msg) => println!("  {} {label}: {msg}", "[FAIL]".red().bold()),
+            Check::Warn(msg) => println!("  {} {label}: {msg}", "[warn]".yellow()),
+            Check::Skip(msg) => println!("  {} {label}: {msg}", "[skip]".dimmed()),
         }
     }
 
@@ -332,9 +333,13 @@ pub async fn run_doctor(config: &AppConfig, config_dir: &Path) -> Result<bool> {
     // Summary
     println!();
     if any_failed {
-        println!("Result: issues found — review [FAIL] items above.");
+        println!(
+            "Result: {} — review {} items above.",
+            "issues found".red().bold(),
+            "[FAIL]".red().bold()
+        );
     } else {
-        println!("Result: all checks passed.");
+        println!("Result: {}", "all checks passed.".green().bold());
     }
 
     Ok(!any_failed)
