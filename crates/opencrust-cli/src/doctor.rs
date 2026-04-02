@@ -49,12 +49,20 @@ fn check_config(config_dir: &Path) -> Check {
     }
 }
 
-fn check_data_dir(config: &AppConfig) -> Check {
-    let data_dir = config
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+fn resolve_data_dir(config: &AppConfig) -> std::path::PathBuf {
+    config
         .data_dir
         .clone()
         .or_else(|| dirs::home_dir().map(|h| h.join(".opencrust").join("data")))
-        .unwrap_or_else(|| ".opencrust/data".into());
+        .unwrap_or_else(|| ".opencrust/data".into())
+}
+
+fn check_data_dir(config: &AppConfig) -> Check {
+    let data_dir = resolve_data_dir(config);
 
     if !data_dir.exists() {
         return Check::Warn(format!(
@@ -105,19 +113,42 @@ async fn check_llm_providers(config: &AppConfig) -> Vec<(String, Check)> {
         )];
     }
 
-    let runtime = opencrust_gateway::bootstrap::build_agent_runtime(config);
+    // build_agent_runtime is infallible but logs warnings for bad config entries.
+    // Wrap in catch_unwind so a broken config can't crash the doctor command.
+    let runtime = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        opencrust_gateway::bootstrap::build_agent_runtime(config)
+    })) {
+        Ok(r) => r,
+        Err(_) => {
+            return vec![(
+                "LLM providers".into(),
+                Check::Fail("agent runtime initialization panicked — check provider config".into()),
+            )];
+        }
+    };
+
     match runtime.health_check_all().await {
-        Ok(results) => results
-            .into_iter()
-            .map(|(id, ok)| {
-                let check = if ok {
-                    Check::Pass("reachable".into())
-                } else {
-                    Check::Fail("health check failed — check API key and connectivity".into())
-                };
-                (format!("LLM provider [{id}]"), check)
-            })
-            .collect(),
+        Ok(results) => {
+            if results.is_empty() {
+                return vec![(
+                    "LLM providers".into(),
+                    Check::Warn(
+                        "no providers could be initialized — check API keys in config".into(),
+                    ),
+                )];
+            }
+            results
+                .into_iter()
+                .map(|(id, ok)| {
+                    let check = if ok {
+                        Check::Pass("reachable".into())
+                    } else {
+                        Check::Fail("health check failed — check API key and connectivity".into())
+                    };
+                    (format!("LLM provider [{id}]"), check)
+                })
+                .collect()
+        }
         Err(e) => vec![(
             "LLM providers".into(),
             Check::Fail(format!("could not run health checks: {e}")),
@@ -145,13 +176,45 @@ fn check_channels(config: &AppConfig) -> Vec<(String, Check)> {
                 );
             }
 
-            // Check that at least one token/key field is set
-            let has_token = ch
-                .settings
-                .values()
-                .any(|v| v.as_str().map(|s| !s.is_empty()).unwrap_or(false));
+            // Check for the known credential field(s) required per channel type.
+            let required_keys: &[&str] = match ch.channel_type.as_str() {
+                "telegram" => &["bot_token"],
+                "discord" => &["bot_token"],
+                "slack" => &["bot_token", "app_token"],
+                "whatsapp" => &["access_token", "phone_number_id"],
+                "line" => &["channel_access_token", "channel_secret"],
+                "imessage" => &[],
+                // Unknown type: fall back to any non-empty setting value.
+                _ => &[],
+            };
 
-            if has_token {
+            let missing: Vec<&str> = if required_keys.is_empty() {
+                // For unknown types or iMessage (no token needed), pass if any setting is set.
+                if ch
+                    .settings
+                    .values()
+                    .any(|v| v.as_str().map(|s| !s.is_empty()).unwrap_or(false))
+                    || ch.channel_type == "imessage"
+                {
+                    vec![]
+                } else {
+                    vec!["(any setting)"]
+                }
+            } else {
+                required_keys
+                    .iter()
+                    .filter(|&&k| {
+                        ch.settings
+                            .get(k)
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.is_empty())
+                            .unwrap_or(true)
+                    })
+                    .copied()
+                    .collect()
+            };
+
+            if missing.is_empty() {
                 (
                     format!("channel [{name}]"),
                     Check::Pass(format!("type={}", ch.channel_type)),
@@ -160,8 +223,9 @@ fn check_channels(config: &AppConfig) -> Vec<(String, Check)> {
                 (
                     format!("channel [{name}]"),
                     Check::Warn(format!(
-                        "type={} — no token/key values found in settings",
-                        ch.channel_type
+                        "type={} — missing or empty: {}",
+                        ch.channel_type,
+                        missing.join(", ")
                     )),
                 )
             }
@@ -201,36 +265,42 @@ async fn check_mcp_servers(config: &AppConfig) -> Vec<(String, Check)> {
 
         let manager = opencrust_agents::McpManager::new();
         let timeout_secs = server.timeout.unwrap_or(5).min(10);
-        let check = match manager
-            .connect(
-                name,
-                &server.command,
-                &server.args,
-                &server.env,
-                timeout_secs,
-            )
-            .await
-        {
-            Ok(()) => {
-                let tools = manager.tool_info(name).await;
-                manager.disconnect(name).await;
-                Check::Pass(format!("connected ({} tools)", tools.len()))
-            }
-            Err(e) => Check::Fail(format!("could not connect: {e}")),
+        let check = match server.transport.as_str() {
+            "http" => match &server.url {
+                Some(url) => match manager.connect_http(name, url, timeout_secs).await {
+                    Ok(()) => {
+                        let tools = manager.tool_info(name).await;
+                        manager.disconnect(name).await;
+                        Check::Pass(format!("connected via HTTP ({} tools)", tools.len()))
+                    }
+                    Err(e) => Check::Fail(format!("could not connect: {e}")),
+                },
+                None => Check::Fail("transport=http but no url configured".into()),
+            },
+            _ => match manager
+                .connect(
+                    name,
+                    &server.command,
+                    &server.args,
+                    &server.env,
+                    timeout_secs,
+                )
+                .await
+            {
+                Ok(()) => {
+                    let tools = manager.tool_info(name).await;
+                    manager.disconnect(name).await;
+                    Check::Pass(format!("connected ({} tools)", tools.len()))
+                }
+                Err(e) => Check::Fail(format!("could not connect: {e}")),
+            },
         };
         results.push((format!("MCP [{name}]"), check));
     }
     results
 }
 
-fn check_database(config: &AppConfig) -> Check {
-    let data_dir = config
-        .data_dir
-        .clone()
-        .or_else(|| dirs::home_dir().map(|h| h.join(".opencrust").join("data")))
-        .unwrap_or_else(|| ".opencrust/data".into());
-
-    let db_path = data_dir.join("sessions.db");
+fn check_sqlite_integrity(db_path: &Path, label: &str) -> Check {
     if !db_path.exists() {
         return Check::Skip(format!(
             "{} not found — will be created on first run",
@@ -238,9 +308,8 @@ fn check_database(config: &AppConfig) -> Check {
         ));
     }
 
-    match opencrust_db::SessionStore::open(&db_path) {
+    match opencrust_db::SessionStore::open(db_path) {
         Ok(store) => {
-            // Run SQLite integrity check
             match store
                 .connection()
                 .query_row("PRAGMA integrity_check", [], |row| row.get::<_, String>(0))
@@ -250,8 +319,15 @@ fn check_database(config: &AppConfig) -> Check {
                 Err(e) => Check::Fail(format!("could not run integrity_check: {e}")),
             }
         }
-        Err(e) => Check::Fail(format!("could not open sessions.db: {e}")),
+        Err(e) => Check::Fail(format!("could not open {label}: {e}")),
     }
+}
+
+fn check_database(config: &AppConfig) -> (Check, Check) {
+    let data_dir = resolve_data_dir(config);
+    let sessions = check_sqlite_integrity(&data_dir.join("sessions.db"), "sessions.db");
+    let memory = check_sqlite_integrity(&data_dir.join("memory.db"), "memory.db");
+    (sessions, memory)
 }
 
 fn check_dna_md(config_dir: &Path) -> Check {
@@ -273,7 +349,7 @@ fn check_dna_md(config_dir: &Path) -> Check {
 /// Run all diagnostic checks and print a report.
 /// Returns `true` if all checks passed (no failures), `false` otherwise.
 pub async fn run_doctor(config: &AppConfig, config_dir: &Path) -> Result<bool> {
-    println!("OpenCrust Doctor\n");
+    println!("OpenCrust Doctor  v{}\n", env!("CARGO_PKG_VERSION"));
 
     let mut any_failed = false;
 
@@ -325,7 +401,9 @@ pub async fn run_doctor(config: &AppConfig, config_dir: &Path) -> Result<bool> {
 
     // 7. Database integrity
     println!();
-    report!("Database (sessions.db)", check_database(config));
+    let (sessions_check, memory_check) = check_database(config);
+    report!("Database (sessions.db)", sessions_check);
+    report!("Database (memory.db)", memory_check);
 
     // 8. dna.md
     report!("dna.md", check_dna_md(config_dir));
