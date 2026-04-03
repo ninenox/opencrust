@@ -296,6 +296,46 @@ pub fn try_vault_set(vault_path: &Path, key: &str, value: &str) -> bool {
     }
 }
 
+/// Try to remove a credential from the vault. Returns `true` if the key
+/// existed and was removed successfully.
+pub fn try_vault_remove(vault_path: &Path, key: &str) -> bool {
+    if !CredentialVault::exists(vault_path) {
+        return false;
+    }
+
+    let passphrase = match resolve_vault_passphrase(vault_path, false) {
+        Some(p) => p,
+        None => {
+            warn!("try_vault_remove: no vault passphrase available");
+            return false;
+        }
+    };
+
+    let mut vault = match CredentialVault::open(vault_path, &passphrase) {
+        Ok(v) => v,
+        Err(e) => {
+            warn!("try_vault_remove: could not open vault: {e}");
+            return false;
+        }
+    };
+
+    if !vault.remove(key) {
+        return false;
+    }
+
+    match vault.save() {
+        Ok(()) => {
+            invalidate_vault_cache(vault_path);
+            info!("removed credential '{key}' from vault");
+            true
+        }
+        Err(e) => {
+            warn!("try_vault_remove: failed to save vault: {e}");
+            false
+        }
+    }
+}
+
 /// Return whether a passphrase source is available for this vault path.
 ///
 /// Sources checked:

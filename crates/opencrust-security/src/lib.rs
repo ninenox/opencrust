@@ -6,7 +6,9 @@ pub mod redaction;
 pub mod validation;
 
 pub use allowlist::{Allowlist, AllowlistMode};
-pub use credentials::{CredentialError, CredentialVault, try_vault_get, try_vault_set};
+pub use credentials::{
+    CredentialError, CredentialVault, try_vault_get, try_vault_remove, try_vault_set,
+};
 pub use pairing::PairingManager;
 pub use policy::{ChannelPolicy, DmAuthResult, DmPolicy, GroupPolicy, check_dm_auth};
 pub use redaction::{RedactingWriter, redact_secrets};

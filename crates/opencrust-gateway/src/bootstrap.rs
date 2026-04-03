@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -540,6 +541,35 @@ pub fn build_agent_runtime(config: &AppConfig) -> AgentRuntime {
     runtime
 }
 
+/// Resolve MCP server env vars through the vault. Empty values trigger a
+/// vault lookup with key `MCP_{SERVER}_{ENV_KEY}`, falling back to the
+/// process environment. Non-empty values pass through unchanged.
+fn resolve_mcp_env(server_name: &str, env: &HashMap<String, String>) -> HashMap<String, String> {
+    let vault_path = default_vault_path();
+    let mut resolved = HashMap::new();
+    for (key, value) in env {
+        if value.is_empty() {
+            let vault_key = format!(
+                "MCP_{}_{}",
+                server_name.to_uppercase().replace('-', "_"),
+                key
+            );
+            if let Some(ref vp) = vault_path
+                && let Some(secret) = opencrust_security::try_vault_get(vp, &vault_key)
+            {
+                resolved.insert(key.clone(), secret);
+                continue;
+            }
+            if let Ok(env_val) = std::env::var(key) {
+                resolved.insert(key.clone(), env_val);
+                continue;
+            }
+        }
+        resolved.insert(key.clone(), value.clone());
+    }
+    resolved
+}
+
 /// Build MCP tools from merged config (config.yml + mcp.json).
 ///
 /// Returns the Arc-wrapped manager, a flat list of bridged tools (including
@@ -572,6 +602,8 @@ pub async fn build_mcp_tools(
 
         let timeout_secs = server_config.timeout.unwrap_or(30);
 
+        let resolved_env = resolve_mcp_env(name, &server_config.env);
+
         let connect_result = match server_config.transport.as_str() {
             "stdio" => {
                 manager
@@ -579,7 +611,7 @@ pub async fn build_mcp_tools(
                         name,
                         &server_config.command,
                         &server_config.args,
-                        &server_config.env,
+                        &resolved_env,
                         timeout_secs,
                     )
                     .await

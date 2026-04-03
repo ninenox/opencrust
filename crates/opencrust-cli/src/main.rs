@@ -1,5 +1,6 @@
 mod banner;
 mod doctor;
+mod mcp_registry;
 mod migrate;
 mod update;
 mod wizard;
@@ -148,6 +149,16 @@ enum SkillCommands {
 enum McpCommands {
     /// List configured MCP servers
     List,
+    /// Add a new MCP server (interactive wizard)
+    Add {
+        /// Server name or registry ID (skip selection prompt)
+        name: Option<String>,
+    },
+    /// Remove an MCP server from configuration
+    Remove {
+        /// Name of the server to remove
+        name: String,
+    },
     /// Connect to an MCP server and list its tools
     Inspect { name: String },
     /// List resources from a connected MCP server
@@ -709,6 +720,12 @@ async fn async_main(
             let loader = opencrust_config::ConfigLoader::new()?;
             let mcp_configs = loader.merged_mcp_config(&config);
             match action {
+                McpCommands::Add { name } => {
+                    wizard::run_mcp_add_wizard(config_loader.config_dir(), name.as_deref()).await?;
+                }
+                McpCommands::Remove { name } => {
+                    wizard::run_mcp_remove(config_loader.config_dir(), &config, &name)?;
+                }
                 McpCommands::List => {
                     println!("Configured MCP servers:");
                     if mcp_configs.is_empty() {

@@ -4,7 +4,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 use dialoguer::{Confirm, Input, MultiSelect, Password, Select};
-use opencrust_config::{AppConfig, ChannelConfig, LlmProviderConfig};
+use opencrust_config::{AppConfig, ChannelConfig, LlmProviderConfig, McpServerConfig};
 use tracing::info;
 
 // ---------------------------------------------------------------------------
@@ -1449,6 +1449,398 @@ pub async fn run_wizard(config_dir: &Path) -> Result<()> {
     println!("  Run `opencrust start` to launch.");
     println!();
 
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// MCP server wizard
+// ---------------------------------------------------------------------------
+
+/// Interactive wizard for `opencrust mcp add`.
+pub async fn run_mcp_add_wizard(config_dir: &Path, pre_selected: Option<&str>) -> Result<()> {
+    use crate::mcp_registry::{self, KNOWN_MCP_SERVERS};
+
+    let config_path = config_dir.join("config.yml");
+    let mut config = load_existing_config(config_dir).unwrap_or_default();
+
+    // --- Server selection ---
+    let known = if let Some(id) = pre_selected {
+        mcp_registry::find_known_server(id)
+    } else {
+        let mut items: Vec<String> = KNOWN_MCP_SERVERS
+            .iter()
+            .map(|s| format!("{} - {}", s.display_name, s.description))
+            .collect();
+        items.push("Custom (enter manually)".to_string());
+
+        let selection = Select::new()
+            .with_prompt("Select an MCP server")
+            .items(&items)
+            .default(0)
+            .interact()
+            .context("selection cancelled")?;
+
+        if selection < KNOWN_MCP_SERVERS.len() {
+            Some(&KNOWN_MCP_SERVERS[selection])
+        } else {
+            None
+        }
+    };
+
+    let (server_name, mcp_config) = if let Some(server) = known {
+        add_known_server(config_dir, server, &config).await?
+    } else {
+        add_custom_server(config_dir, &config).await?
+    };
+
+    // --- Connection validation ---
+    let should_test = Confirm::new()
+        .with_prompt("Test connection now?")
+        .default(true)
+        .interact()
+        .unwrap_or(true);
+
+    if should_test {
+        println!("Connecting to '{server_name}'...");
+        let manager = opencrust_agents::McpManager::new();
+        let timeout = mcp_config.timeout.unwrap_or(30);
+
+        let result = match mcp_config.transport.as_str() {
+            "http" => {
+                if let Some(ref url) = mcp_config.url {
+                    manager.connect_http(&server_name, url, timeout).await
+                } else {
+                    Err(opencrust_common::Error::Agent(
+                        "HTTP transport but no url".into(),
+                    ))
+                }
+            }
+            _ => {
+                // Resolve env vars through vault for the test connection
+                let resolved_env =
+                    resolve_wizard_mcp_env(&server_name, &mcp_config.env, config_dir);
+                manager
+                    .connect(
+                        &server_name,
+                        &mcp_config.command,
+                        &mcp_config.args,
+                        &resolved_env,
+                        timeout,
+                    )
+                    .await
+            }
+        };
+
+        match result {
+            Ok(()) => {
+                let tools = manager.tool_info(&server_name).await;
+                println!(
+                    "  Connected ({} tool{})",
+                    tools.len(),
+                    if tools.len() == 1 { "" } else { "s" }
+                );
+                for tool in &tools {
+                    let desc = tool.description.as_deref().unwrap_or("");
+                    println!("    {} - {desc}", tool.name);
+                }
+                manager.disconnect(&server_name).await;
+            }
+            Err(e) => {
+                println!("  Connection failed: {e}");
+                println!(
+                    "  Config will still be saved. Check the server setup and try `opencrust mcp inspect {server_name}`."
+                );
+            }
+        }
+    }
+
+    // --- Save config ---
+    config.mcp.insert(server_name.clone(), mcp_config);
+    let yaml = serde_yaml::to_string(&config).context("failed to serialize config")?;
+    std::fs::write(&config_path, &yaml)
+        .context(format!("failed to write {}", config_path.display()))?;
+
+    println!();
+    println!("  Server '{server_name}' added to config.yml.");
+    println!("  Hot-reload will pick it up if the server is running.");
+    println!();
+
+    Ok(())
+}
+
+/// Add a known server from the registry.
+async fn add_known_server(
+    config_dir: &Path,
+    server: &crate::mcp_registry::KnownMcpServer,
+    existing_config: &AppConfig,
+) -> Result<(String, McpServerConfig)> {
+    println!();
+    println!("  -- {} --", server.display_name);
+    if !server.setup_instructions.is_empty() {
+        println!("  {}", server.setup_instructions);
+    }
+    println!();
+
+    // Server name
+    let default_name = server.id.to_string();
+    let name: String = Input::new()
+        .with_prompt("Server name in config")
+        .default(default_name)
+        .interact_text()
+        .context("name input cancelled")?;
+
+    if existing_config.mcp.contains_key(&name) {
+        anyhow::bail!(
+            "MCP server '{name}' already exists in config. Remove it first with `opencrust mcp remove {name}`."
+        );
+    }
+
+    // Collect secrets
+    let mut env = HashMap::new();
+    let vault_path = config_dir.join("credentials").join("vault.json");
+
+    for req in server.required_env {
+        println!();
+        println!("  {}", req.description);
+
+        let value: String = if req.is_secret {
+            Password::new()
+                .with_prompt(req.key)
+                .interact()
+                .context("input cancelled")?
+        } else {
+            Input::new()
+                .with_prompt(req.key)
+                .interact_text()
+                .context("input cancelled")?
+        };
+
+        if req.is_secret && !value.is_empty() {
+            let vault_key = format!("MCP_{}_{}", name.to_uppercase().replace('-', "_"), req.key);
+            if opencrust_security::try_vault_set(&vault_path, &vault_key, &value) {
+                println!("  Stored in vault.");
+                env.insert(req.key.to_string(), String::new()); // empty = vault sentinel
+            } else {
+                println!("  Vault unavailable, storing in config (plaintext).");
+                env.insert(req.key.to_string(), value);
+            }
+        } else if !value.is_empty() {
+            env.insert(req.key.to_string(), value);
+        }
+    }
+
+    // For filesystem server, prompt for allowed paths
+    let mut args: Vec<String> = server.args.iter().map(|s| s.to_string()).collect();
+    if server.id == "filesystem" {
+        let paths: String = Input::new()
+            .with_prompt("Allowed directory paths (space-separated)")
+            .default("/tmp".to_string())
+            .interact_text()
+            .context("path input cancelled")?;
+        for p in paths.split_whitespace() {
+            args.push(p.to_string());
+        }
+    }
+
+    let mcp_config = McpServerConfig {
+        command: server.command.to_string(),
+        args,
+        env,
+        transport: server.transport.to_string(),
+        url: None,
+        enabled: Some(true),
+        timeout: None,
+    };
+
+    Ok((name, mcp_config))
+}
+
+/// Add a custom MCP server.
+async fn add_custom_server(
+    config_dir: &Path,
+    existing_config: &AppConfig,
+) -> Result<(String, McpServerConfig)> {
+    println!();
+    println!("  -- Custom MCP Server --");
+    println!();
+
+    let name: String = Input::new()
+        .with_prompt("Server name")
+        .interact_text()
+        .context("name input cancelled")?;
+
+    if existing_config.mcp.contains_key(&name) {
+        anyhow::bail!("MCP server '{name}' already exists in config.");
+    }
+
+    let transport_choices = &["stdio", "http"];
+    let transport_idx = Select::new()
+        .with_prompt("Transport")
+        .items(transport_choices)
+        .default(0)
+        .interact()
+        .context("transport selection cancelled")?;
+    let transport = transport_choices[transport_idx].to_string();
+
+    let (command, args, url) = if transport == "http" {
+        let url: String = Input::new()
+            .with_prompt("Server URL")
+            .interact_text()
+            .context("url input cancelled")?;
+        (String::new(), vec![], Some(url))
+    } else {
+        let command: String = Input::new()
+            .with_prompt("Command (e.g. npx)")
+            .interact_text()
+            .context("command input cancelled")?;
+        let args_str: String = Input::new()
+            .with_prompt("Arguments (space-separated)")
+            .default(String::new())
+            .interact_text()
+            .context("args input cancelled")?;
+        let args: Vec<String> = args_str.split_whitespace().map(|s| s.to_string()).collect();
+        (command, args, None)
+    };
+
+    // Env vars
+    let mut env = HashMap::new();
+    let vault_path = config_dir.join("credentials").join("vault.json");
+
+    let add_env = Confirm::new()
+        .with_prompt("Add environment variables (API tokens, etc.)?")
+        .default(false)
+        .interact()
+        .unwrap_or(false);
+
+    if add_env {
+        loop {
+            let key: String = Input::new()
+                .with_prompt("Env var name (empty to finish)")
+                .default(String::new())
+                .interact_text()
+                .context("env key input cancelled")?;
+
+            if key.is_empty() {
+                break;
+            }
+
+            let is_secret = Confirm::new()
+                .with_prompt("Is this a secret (store in vault)?")
+                .default(true)
+                .interact()
+                .unwrap_or(true);
+
+            let value: String = if is_secret {
+                Password::new()
+                    .with_prompt(&key)
+                    .interact()
+                    .context("input cancelled")?
+            } else {
+                Input::new()
+                    .with_prompt(&key)
+                    .interact_text()
+                    .context("input cancelled")?
+            };
+
+            if is_secret && !value.is_empty() {
+                let vault_key = format!("MCP_{}_{}", name.to_uppercase().replace('-', "_"), &key);
+                if opencrust_security::try_vault_set(&vault_path, &vault_key, &value) {
+                    println!("  Stored in vault.");
+                    env.insert(key, String::new());
+                } else {
+                    println!("  Vault unavailable, storing in config (plaintext).");
+                    env.insert(key, value);
+                }
+            } else if !value.is_empty() {
+                env.insert(key, value);
+            }
+        }
+    }
+
+    let mcp_config = McpServerConfig {
+        command,
+        args,
+        env,
+        transport,
+        url,
+        enabled: Some(true),
+        timeout: None,
+    };
+
+    Ok((name, mcp_config))
+}
+
+/// Resolve MCP env vars for the wizard's test connection (mirrors bootstrap logic).
+fn resolve_wizard_mcp_env(
+    server_name: &str,
+    env: &HashMap<String, String>,
+    config_dir: &Path,
+) -> HashMap<String, String> {
+    let vault_path = config_dir.join("credentials").join("vault.json");
+    let mut resolved = HashMap::new();
+    for (key, value) in env {
+        if value.is_empty() {
+            let vault_key = format!(
+                "MCP_{}_{}",
+                server_name.to_uppercase().replace('-', "_"),
+                key
+            );
+            if let Some(secret) = opencrust_security::try_vault_get(&vault_path, &vault_key) {
+                resolved.insert(key.clone(), secret);
+                continue;
+            }
+            if let Ok(env_val) = std::env::var(key) {
+                resolved.insert(key.clone(), env_val);
+                continue;
+            }
+        }
+        resolved.insert(key.clone(), value.clone());
+    }
+    resolved
+}
+
+/// Remove an MCP server from config and clean up vault entries.
+pub fn run_mcp_remove(config_dir: &Path, config: &AppConfig, name: &str) -> Result<()> {
+    let config_path = config_dir.join("config.yml");
+    let mut config = config.clone();
+
+    if config.mcp.remove(name).is_none() {
+        println!("MCP server '{name}' not found in config.yml.");
+        println!("If it's in ~/.opencrust/mcp.json, remove it manually.");
+        return Ok(());
+    }
+
+    // Clean up vault entries matching MCP_{NAME}_*
+    let vault_path = config_dir.join("credentials").join("vault.json");
+    let prefix = format!("MCP_{}_", name.to_uppercase().replace('-', "_"));
+
+    if opencrust_security::CredentialVault::exists(&vault_path)
+        && let Ok(passphrase) = std::env::var("OPENCRUST_VAULT_PASSPHRASE")
+        && let Ok(vault) = opencrust_security::CredentialVault::open(&vault_path, &passphrase)
+    {
+        let keys_to_remove: Vec<String> = vault
+            .list_keys()
+            .iter()
+            .filter(|k| k.starts_with(&prefix))
+            .map(|k| k.to_string())
+            .collect();
+        for key in &keys_to_remove {
+            opencrust_security::try_vault_remove(&vault_path, key);
+        }
+        if !keys_to_remove.is_empty() {
+            println!(
+                "Removed {} vault credential{}.",
+                keys_to_remove.len(),
+                if keys_to_remove.len() == 1 { "" } else { "s" }
+            );
+        }
+    }
+
+    let yaml = serde_yaml::to_string(&config).context("failed to serialize config")?;
+    std::fs::write(&config_path, &yaml)
+        .context(format!("failed to write {}", config_path.display()))?;
+
+    println!("Removed MCP server '{name}' from config.yml.");
     Ok(())
 }
 
