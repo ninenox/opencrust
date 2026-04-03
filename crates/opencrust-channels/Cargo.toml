@@ -1,8 +1,8 @@
 [package]
 name = "opencrust-channels"
-version.workspace = true
-edition.workspace = true
-license.workspace = true
+version = { workspace = true }
+edition = { workspace = true }
+license = { workspace = true }
 description = "Messaging channel traits and implementations for OpenCrust"
 
 [dependencies]
@@ -42,4 +42,5 @@ whatsapp = ["dep:axum"]
 whatsapp-web = ["dep:dirs"]
 imessage = ["dep:rusqlite", "dep:dirs"]
 line = ["dep:axum", "dep:ring", "dep:base64"]
+wechat = ["dep:axum", "dep:ring"]
 
