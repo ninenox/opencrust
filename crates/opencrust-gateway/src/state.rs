@@ -520,10 +520,12 @@ impl AppState {
         let guard = store.lock().await;
         if let Err(e) = guard.record_usage(
             session_id,
-            &user_id,
-            &channel_id,
-            provider,
-            model,
+            opencrust_db::UsageAttribution {
+                user_id: &user_id,
+                channel_id: &channel_id,
+                provider,
+                model,
+            },
             input_tokens,
             output_tokens,
         ) {

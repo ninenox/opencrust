@@ -23,6 +23,15 @@ pub struct UsageRecord {
     pub total_tokens: u64,
 }
 
+/// Attribution data for a token usage record.
+#[derive(Debug, Clone)]
+pub struct UsageAttribution<'a> {
+    pub user_id: &'a str,
+    pub channel_id: &'a str,
+    pub provider: &'a str,
+    pub model: &'a str,
+}
+
 /// Persistent storage for conversation sessions and message history.
 pub struct SessionStore {
     conn: Connection,
@@ -99,10 +108,10 @@ impl SessionStore {
         // v2: add user_id and channel_id to usage_log (idempotent)
         for (col, col_type) in USAGE_SCHEMA_V2_COLUMNS {
             let sql = format!("ALTER TABLE usage_log ADD COLUMN {col} {col_type}");
-            if let Err(e) = self.conn.execute(&sql, []) {
-                if !e.to_string().contains("duplicate column") {
-                    return Err(Error::Database(format!("usage v2 migration failed: {e}")));
-                }
+            if let Err(e) = self.conn.execute(&sql, [])
+                && !e.to_string().contains("duplicate column")
+            {
+                return Err(Error::Database(format!("usage v2 migration failed: {e}")));
             }
         }
         self.conn
@@ -558,10 +567,7 @@ impl SessionStore {
     pub fn record_usage(
         &self,
         session_id: &str,
-        user_id: &str,
-        channel_id: &str,
-        provider: &str,
-        model: &str,
+        attribution: UsageAttribution<'_>,
         input_tokens: u32,
         output_tokens: u32,
     ) -> Result<()> {
@@ -574,10 +580,10 @@ impl SessionStore {
                 params![
                     id,
                     session_id,
-                    user_id,
-                    channel_id,
-                    provider,
-                    model,
+                    attribution.user_id,
+                    attribution.channel_id,
+                    attribution.provider,
+                    attribution.model,
                     input_tokens,
                     output_tokens
                 ],
@@ -774,7 +780,7 @@ fn parse_timestamp(value: &str) -> chrono::DateTime<chrono::Utc> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ScheduledTask, SessionStore};
+    use super::{ScheduledTask, SessionStore, UsageAttribution};
     use chrono::Duration;
 
     #[test]
@@ -1298,13 +1304,43 @@ mod tests {
     fn record_and_query_usage_all_time() {
         let store = SessionStore::in_memory().expect("in-memory store");
         store
-            .record_usage("s1", "user1", "test", "anthropic", "claude-sonnet", 100, 50)
+            .record_usage(
+                "s1",
+                UsageAttribution {
+                    user_id: "user1",
+                    channel_id: "test",
+                    provider: "anthropic",
+                    model: "claude-sonnet",
+                },
+                100,
+                50,
+            )
             .expect("record_usage should succeed");
         store
-            .record_usage("s1", "user1", "test", "anthropic", "claude-sonnet", 200, 80)
+            .record_usage(
+                "s1",
+                UsageAttribution {
+                    user_id: "user1",
+                    channel_id: "test",
+                    provider: "anthropic",
+                    model: "claude-sonnet",
+                },
+                200,
+                80,
+            )
             .expect("record_usage should succeed");
         store
-            .record_usage("s2", "user2", "test", "openai", "gpt-4o", 300, 100)
+            .record_usage(
+                "s2",
+                UsageAttribution {
+                    user_id: "user2",
+                    channel_id: "test",
+                    provider: "openai",
+                    model: "gpt-4o",
+                },
+                300,
+                100,
+            )
             .expect("record_usage should succeed");
 
         // Query all sessions
@@ -1336,13 +1372,43 @@ mod tests {
     fn record_usage_stores_user_and_channel() {
         let store = SessionStore::in_memory().expect("in-memory store");
         store
-            .record_usage("s1", "alice", "telegram", "anthropic", "claude", 100, 50)
+            .record_usage(
+                "s1",
+                UsageAttribution {
+                    user_id: "alice",
+                    channel_id: "telegram",
+                    provider: "anthropic",
+                    model: "claude",
+                },
+                100,
+                50,
+            )
             .expect("record_usage");
         store
-            .record_usage("s2", "alice", "discord", "anthropic", "claude", 200, 100)
+            .record_usage(
+                "s2",
+                UsageAttribution {
+                    user_id: "alice",
+                    channel_id: "discord",
+                    provider: "anthropic",
+                    model: "claude",
+                },
+                200,
+                100,
+            )
             .expect("record_usage");
         store
-            .record_usage("s3", "bob", "telegram", "anthropic", "claude", 300, 150)
+            .record_usage(
+                "s3",
+                UsageAttribution {
+                    user_id: "bob",
+                    channel_id: "telegram",
+                    provider: "anthropic",
+                    model: "claude",
+                },
+                300,
+                150,
+            )
             .expect("record_usage");
 
         let alice = store
