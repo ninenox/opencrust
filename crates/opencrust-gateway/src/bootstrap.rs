@@ -875,9 +875,7 @@ pub fn build_discord_channels(
 
                     let session_id = format!("discord-{channel_id}");
 
-                    if let Err(e) = state.check_user_rate_limit(&user_id, &rate_limit_config) {
-                        return Err(e);
-                    }
+                    state.check_user_rate_limit(&user_id, &rate_limit_config)?;
 
                     let text = opencrust_security::InputValidator::sanitize(&text);
                     if opencrust_security::InputValidator::exceeds_length(&text, max_input_chars) {
@@ -1145,9 +1143,7 @@ pub fn build_telegram_channels(
 
                     let session_id = format!("telegram-{chat_id}");
 
-                    if let Err(e) = state.check_user_rate_limit(&user_id, &rate_limit_config) {
-                        return Err(e);
-                    }
+                    state.check_user_rate_limit(&user_id, &rate_limit_config)?;
 
                     // --- Handle media or text ---
                     match attachment {
@@ -1851,9 +1847,7 @@ pub fn build_slack_channels(
 
                     let session_id = format!("slack-{channel_id}");
 
-                    if let Err(e) = state.check_user_rate_limit(&user_id, &rate_limit_config) {
-                        return Err(e);
-                    }
+                    state.check_user_rate_limit(&user_id, &rate_limit_config)?;
 
                     let text = opencrust_security::InputValidator::sanitize(&text);
                     if opencrust_security::InputValidator::check_prompt_injection(&text) {
@@ -2066,9 +2060,7 @@ pub fn build_whatsapp_channels(
 
                     let session_id = format!("whatsapp-{from_number}");
 
-                    if let Err(e) = state.check_user_rate_limit(&from_number, &rate_limit_config) {
-                        return Err(e);
-                    }
+                    state.check_user_rate_limit(&from_number, &rate_limit_config)?;
 
                     let text = opencrust_security::InputValidator::sanitize(&text);
                     if opencrust_security::InputValidator::check_prompt_injection(&text) {
@@ -2266,9 +2258,7 @@ pub fn build_whatsapp_web_channels(
 
                     let session_id = format!("whatsapp-web-{from_jid}");
 
-                    if let Err(e) = state.check_user_rate_limit(&from_jid, &rate_limit_config) {
-                        return Err(e);
-                    }
+                    state.check_user_rate_limit(&from_jid, &rate_limit_config)?;
 
                     let text = opencrust_security::InputValidator::sanitize(&text);
                     if opencrust_security::InputValidator::check_prompt_injection(&text) {
@@ -2441,9 +2431,7 @@ pub fn build_imessage_channels(
                     // session_key is group_name for groups, sender handle for DMs
                     let session_id = format!("imessage-{session_key}");
 
-                    if let Err(e) = state.check_user_rate_limit(&sender_id, &rate_limit_config) {
-                        return Err(e);
-                    }
+                    state.check_user_rate_limit(&sender_id, &rate_limit_config)?;
 
                     let text = opencrust_security::InputValidator::sanitize(&text);
                     if opencrust_security::InputValidator::check_prompt_injection(&text) {
@@ -2628,9 +2616,7 @@ pub fn build_line_channels(
                         format!("line-{user_id}")
                     };
 
-                    if let Err(e) = state.check_user_rate_limit(&user_id, &rate_limit_config) {
-                        return Err(e);
-                    }
+                    state.check_user_rate_limit(&user_id, &rate_limit_config)?;
 
                     let text = opencrust_security::InputValidator::sanitize(&text);
                     if opencrust_security::InputValidator::check_prompt_injection(&text) {
@@ -2825,9 +2811,7 @@ pub fn build_wechat_channels(
 
                     let session_id = format!("wechat-{context_id}");
 
-                    if let Err(e) = state.check_user_rate_limit(&user_id, &rate_limit_config) {
-                        return Err(e);
-                    }
+                    state.check_user_rate_limit(&user_id, &rate_limit_config)?;
 
                     let text = opencrust_security::InputValidator::sanitize(&text);
                     if opencrust_security::InputValidator::check_prompt_injection(&text) {
