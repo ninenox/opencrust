@@ -495,6 +495,24 @@ async function refreshStatus() {
   loadUsage();
 }
 
+async function loadSessionHistory(sid) {
+  try {
+    const headers = gatewayKey ? { Authorization: `Bearer ${gatewayKey}` } : {};
+    const r = await fetch(`/api/sessions/${encodeURIComponent(sid)}/history`, { headers });
+    if (!r.ok) return;
+    const j = await r.json();
+    const msgs = j.messages || [];
+    if (msgs.length === 0) return;
+    chatEl.querySelectorAll(".msg").forEach((m) => m.remove());
+    for (const msg of msgs) {
+      appendMessage(msg.role === "assistant" ? "assistant" : "user", msg.content);
+    }
+    appendMessage("sys", `Session restored (${msgs.length} messages).`);
+  } catch {
+    // silently ignore — chat will just be empty
+  }
+}
+
 async function loadUsage() {
   const periodEl = document.getElementById("usage-period");
   const period = periodEl ? periodEl.value : "";
@@ -695,8 +713,10 @@ function handleServerEvent(raw) {
       refreshStatus();
       break;
     case "resumed":
-      appendMessage("sys", `Session resumed (${evt.history_length ?? 0} messages in history).`);
       refreshStatus();
+      if (evt.history_length && evt.history_length > 0) {
+        loadSessionHistory(evt.session_id || sessionId);
+      }
       break;
     case "message":
       appendOrUpdateStreamMessage("assistant", evt.content || "(empty response)");
