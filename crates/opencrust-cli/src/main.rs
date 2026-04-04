@@ -118,6 +118,17 @@ enum Commands {
 
     /// Roll back to the previous version
     Rollback,
+
+    /// Uninstall OpenCrust (remove binary and data)
+    Uninstall {
+        /// Skip confirmation prompt
+        #[arg(long, short = 'y')]
+        yes: bool,
+
+        /// Keep config and data, only remove the binary
+        #[arg(long)]
+        keep_data: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1103,6 +1114,10 @@ async fn async_main(
                 Err(e) => println!("rollback failed: {}", e),
             }
         }
+        Commands::Uninstall { yes, keep_data } => {
+            init_tracing(&cli.log_level);
+            run_uninstall(yes, keep_data, &config)?;
+        }
     }
 
     Ok(())
@@ -1291,6 +1306,78 @@ fn stop_daemon(port: u16) -> Result<()> {
 #[cfg(not(any(unix, windows)))]
 fn stop_daemon(_port: u16) -> Result<()> {
     anyhow::bail!("daemon stop is not supported on this platform");
+}
+
+fn run_uninstall(yes: bool, keep_data: bool, config: &opencrust_config::AppConfig) -> Result<()> {
+    let opencrust_dir = opencrust_dir();
+    let binary_path = std::env::current_exe().context("failed to determine binary path")?;
+
+    // Show what will be removed
+    println!();
+    println!("  This will remove:");
+    println!("    - OpenCrust binary at {}", binary_path.display());
+    if !keep_data {
+        if opencrust_dir.exists() {
+            println!(
+                "    - Configuration and data at {}/",
+                opencrust_dir.display()
+            );
+        }
+    } else {
+        println!(
+            "    (keeping config and data at {}/)",
+            opencrust_dir.display()
+        );
+    }
+    println!();
+
+    // Confirm
+    if !yes {
+        let confirmed = dialoguer::Confirm::new()
+            .with_prompt("Are you sure?")
+            .default(false)
+            .interact()
+            .unwrap_or(false);
+
+        if !confirmed {
+            println!("Cancelled.");
+            return Ok(());
+        }
+    }
+
+    // Stop daemon if running
+    try_stop_daemon(config.gateway.port);
+
+    // Remove data directory
+    if !keep_data && opencrust_dir.exists() {
+        std::fs::remove_dir_all(&opencrust_dir)
+            .context(format!("failed to remove {}", opencrust_dir.display()))?;
+        println!("Removed {}/", opencrust_dir.display());
+    }
+
+    // Remove binary - on Unix we can delete our own executable while running.
+    // On Windows this may fail, so we handle it gracefully.
+    match std::fs::remove_file(&binary_path) {
+        Ok(()) => println!("Removed {}", binary_path.display()),
+        Err(e) => {
+            // On Windows, suggest manual removal
+            println!(
+                "Could not remove binary ({}). Delete it manually:\n  rm {}",
+                e,
+                binary_path.display()
+            );
+        }
+    }
+
+    // Also remove the .old backup if it exists (from self-update)
+    let old_path = binary_path.with_extension("old");
+    if old_path.exists() {
+        let _ = std::fs::remove_file(&old_path);
+    }
+
+    println!();
+    println!("OpenCrust has been uninstalled.");
+    Ok(())
 }
 
 #[cfg(test)]
