@@ -333,6 +333,13 @@ body.ready {
   height: 100%;
 }
 
+/* Right status sidebar: flex column so sidebar-body can grow and scroll */
+.workspace > aside.panel {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
 .panel {
   border: 1px solid var(--panel-edge);
   border-radius: 16px;
@@ -387,6 +394,10 @@ body.ready {
   padding: 14px;
   display: grid;
   gap: 14px;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  flex: 1;
+  min-height: 0;
 }
 
 .status-group {
@@ -1035,8 +1046,14 @@ textarea,
     grid-template-rows: 1fr;
   }
 
+  /* Show status panel below chat with a capped height + scroll */
   .workspace > aside.panel {
-    display: none;
+    max-height: 260px;
+    overflow: hidden;
+  }
+
+  .workspace > aside.panel .sidebar-body {
+    max-height: 200px;
   }
 
   /* Let chat fill all remaining height naturally */
@@ -1108,10 +1125,14 @@ textarea,
     overflow-y: hidden;
   }
 
-  /* Workspace fills remaining height */
+  /* Workspace fills remaining height; hide status panel — too narrow */
   .workspace {
     flex: 1;
     min-height: 0;
+  }
+
+  .workspace > aside.panel {
+    display: none;
   }
 
   /* Chat panel stretches to fill workspace */
