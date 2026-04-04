@@ -331,6 +331,14 @@ async fn process_text_message(
                 )
                 .await;
 
+            if let Some((input, output, provider, model)) =
+                state.agents.take_session_usage(session_id)
+            {
+                state
+                    .persist_usage(session_id, &provider, &model, input, output)
+                    .await;
+            }
+
             serde_json::json!({
                 "type": "message",
                 "session_id": session_id,

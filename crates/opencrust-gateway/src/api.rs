@@ -147,6 +147,13 @@ pub async fn send_message(
                     None,
                 )
                 .await;
+            if let Some((input, output, provider, model)) =
+                state.agents.take_session_usage(&session_id)
+            {
+                state
+                    .persist_usage(&session_id, &provider, &model, input, output)
+                    .await;
+            }
             (
                 StatusCode::OK,
                 Json(serde_json::json!(SendMessageResponse {

@@ -492,6 +492,29 @@ async function refreshStatus() {
   }
 
   loadProviders();
+  loadUsage();
+}
+
+async function loadUsage() {
+  const periodEl = document.getElementById("usage-period");
+  const period = periodEl ? periodEl.value : "";
+  const url = period ? `/api/usage?period=${encodeURIComponent(period)}` : "/api/usage";
+  try {
+    const r = await fetch(url);
+    const j = await r.json();
+    const fmt = (n) => (typeof n === "number" ? n.toLocaleString() : "—");
+    const inputEl = document.getElementById("usage-input");
+    const outputEl = document.getElementById("usage-output");
+    const totalEl = document.getElementById("usage-total");
+    if (inputEl) inputEl.textContent = fmt(j.input_tokens);
+    if (outputEl) outputEl.textContent = fmt(j.output_tokens);
+    if (totalEl) totalEl.textContent = fmt(j.total_tokens);
+  } catch {
+    ["usage-input", "usage-output", "usage-total"].forEach((id) => {
+      const el = document.getElementById(id);
+      if (el) el.textContent = "—";
+    });
+  }
 }
 
 async function loadProviders() {
@@ -772,6 +795,9 @@ clearBtn.addEventListener("click", () => {
 });
 
 refreshBtn.addEventListener("click", refreshStatus);
+
+const usagePeriodEl = document.getElementById("usage-period");
+if (usagePeriodEl) usagePeriodEl.addEventListener("change", loadUsage);
 
 updateBannerClose.addEventListener("click", () => {
   updateBanner.style.display = "none";
