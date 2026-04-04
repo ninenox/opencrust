@@ -330,7 +330,11 @@ fn env_var_for_provider(provider: &str) -> &str {
     match provider {
         "anthropic" => "ANTHROPIC_API_KEY",
         "openai" => "OPENAI_API_KEY",
+        "ollama" => "OLLAMA_API_KEY",
         "sansa" => "SANSA_API_KEY",
+        "deepseek" => "DEEPSEEK_API_KEY",
+        "mistral" => "MISTRAL_API_KEY",
+        "gemini" => "GEMINI_API_KEY",
         "vllm" => "VLLM_API_KEY",
         _ => "API_KEY",
     }
@@ -470,7 +474,16 @@ async fn section_provider(
     }
 
     // Manual provider selection
-    let providers = &["anthropic", "openai", "sansa", "vllm"];
+    let providers = &[
+        "anthropic",
+        "openai",
+        "ollama",
+        "sansa",
+        "deepseek",
+        "mistral",
+        "gemini",
+        "vllm",
+    ];
     let default_idx = existing_provider
         .as_deref()
         .and_then(|p| providers.iter().position(|&x| x == p))
@@ -517,6 +530,47 @@ async fn section_provider(
 
     if let Some(ref url) = base_url {
         println!("  Using custom base URL: {}", url);
+    }
+
+    // Ollama: ask for model, default base URL, no API key, ping server
+    if provider == "ollama" {
+        let existing_model = existing
+            .as_ref()
+            .and_then(|c| c.llm.get("main"))
+            .and_then(|p| p.model.as_deref());
+
+        let model_input: String = Input::new()
+            .with_prompt("Model name")
+            .default("llama3.1".to_string())
+            .interact_text()
+            .context("model name input cancelled")?;
+
+        let model = if model_input.trim().is_empty() {
+            existing_model.map(|s| s.to_string())
+        } else {
+            Some(model_input.trim().to_string())
+        };
+
+        let effective_url = base_url
+            .as_deref()
+            .unwrap_or("http://localhost:11434")
+            .to_string();
+
+        print!("  Testing Ollama connection... ");
+        match validate_llm_key("ollama", "unused", Some(&effective_url)).await {
+            Ok(true) => println!("connected"),
+            Ok(false) => println!("unreachable (start Ollama first: `ollama serve`)"),
+            Err(e) => println!("skipped ({e})"),
+        }
+
+        return Ok(Some(ProviderResult {
+            provider: provider.to_string(),
+            api_key: String::new(),
+            model,
+            base_url: Some(effective_url),
+            from_env: true, // no key to store
+            verified: false,
+        }));
     }
 
     // vLLM: ask for model name (required) then optional API key, then ping server
