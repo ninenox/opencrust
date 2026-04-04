@@ -229,10 +229,10 @@ async fn get_token_cached(
 ) -> opencrust_common::Result<String> {
     {
         let guard = cache.read().await;
-        if let Some((token, fetched_at)) = guard.as_ref() {
-            if fetched_at.elapsed() < TOKEN_TTL {
-                return Ok(token.clone());
-            }
+        if let Some((token, fetched_at)) = guard.as_ref()
+            && fetched_at.elapsed() < TOKEN_TTL
+        {
+            return Ok(token.clone());
         }
     }
     let token = api::get_access_token(client, appid, secret, api_base_url)
