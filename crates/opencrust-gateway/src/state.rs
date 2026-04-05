@@ -64,6 +64,16 @@ pub struct AppState {
     user_rate_limits: DashMap<String, UserRateLimitEntry>,
     /// Accumulated token counts per session (input + output), reset on session eviction.
     session_token_counts: DashMap<String, u32>,
+    /// Pending files awaiting ingestion confirmation, keyed by session_id.
+    pending_files: DashMap<String, PendingFile>,
+}
+
+/// A file received in chat waiting for the user to confirm ingestion.
+#[derive(Debug, Clone)]
+pub struct PendingFile {
+    pub filename: String,
+    pub data: Vec<u8>,
+    pub received_at: Instant,
 }
 
 #[derive(Debug, Clone)]
@@ -107,7 +117,29 @@ impl AppState {
             config_rx: None,
             user_rate_limits: DashMap::new(),
             session_token_counts: DashMap::new(),
+            pending_files: DashMap::new(),
         }
+    }
+
+    /// Store a file pending ingestion confirmation for a session.
+    pub fn set_pending_file(&self, session_id: &str, file: PendingFile) {
+        self.pending_files.insert(session_id.to_string(), file);
+    }
+
+    /// Take and remove a pending file for a session.
+    pub fn take_pending_file(&self, session_id: &str) -> Option<PendingFile> {
+        self.pending_files
+            .remove(session_id)
+            .map(|(_, f)| f)
+            .filter(|f| f.received_at.elapsed() < Duration::from_secs(300)) // 5 min expiry
+    }
+
+    /// Check if a session has a pending file.
+    pub fn has_pending_file(&self, session_id: &str) -> bool {
+        self.pending_files
+            .get(session_id)
+            .map(|f| f.received_at.elapsed() < Duration::from_secs(300))
+            .unwrap_or(false)
     }
 
     /// Attach a persistent session store used to hydrate and persist chat history.
@@ -647,6 +679,22 @@ impl AppState {
         self.agents
             .retain_session_tool_configs(|session_id| self.sessions.contains_key(session_id));
 
+        // Evict rate-limit entries whose sliding window has fully expired and
+        // whose cooldown (if any) has also elapsed. Without this, the DashMap
+        // grows unboundedly on public bots with many unique users.
+        self.user_rate_limits.retain(|_, entry| {
+            let window_active = entry
+                .timestamps
+                .back()
+                .map(|t| now.duration_since(*t) < RATE_LIMIT_WINDOW)
+                .unwrap_or(false);
+            let cooldown_active = entry
+                .cooldown_until
+                .map(|until| now < until)
+                .unwrap_or(false);
+            window_active || cooldown_active
+        });
+
         if removed > 0 {
             info!("cleaned up {removed} expired sessions");
         }
@@ -942,5 +990,45 @@ mod tests {
         state.cleanup_expired_sessions();
 
         assert!(!state.session_token_counts.contains_key(&id));
+    }
+
+    #[test]
+    fn cleanup_evicts_stale_rate_limit_entries() {
+        let state = test_state();
+        let cfg = rate_limit_config(60, 5, 0);
+
+        // Record a message for "user_a" so an entry is created.
+        assert!(state.check_user_rate_limit("user_a", &cfg).is_ok());
+        assert!(state.user_rate_limits.contains_key("user_a"));
+
+        // Backdate the timestamps so they fall outside the sliding window.
+        if let Some(mut entry) = state.user_rate_limits.get_mut("user_a") {
+            for ts in entry.timestamps.iter_mut() {
+                *ts = Instant::now() - RATE_LIMIT_WINDOW - Duration::from_secs(1);
+            }
+        }
+
+        state.cleanup_expired_sessions();
+
+        assert!(
+            !state.user_rate_limits.contains_key("user_a"),
+            "stale rate-limit entry should be evicted by cleanup"
+        );
+    }
+
+    #[test]
+    fn cleanup_retains_active_rate_limit_entries() {
+        let state = test_state();
+        let cfg = rate_limit_config(60, 5, 0);
+
+        // Record a fresh message — entry is within the window.
+        assert!(state.check_user_rate_limit("user_b", &cfg).is_ok());
+
+        state.cleanup_expired_sessions();
+
+        assert!(
+            state.user_rate_limits.contains_key("user_b"),
+            "active rate-limit entry should NOT be evicted"
+        );
     }
 }

@@ -327,17 +327,7 @@ fn load_existing_config(config_dir: &Path) -> Option<AppConfig> {
 }
 
 fn env_var_for_provider(provider: &str) -> &str {
-    match provider {
-        "anthropic" => "ANTHROPIC_API_KEY",
-        "openai" => "OPENAI_API_KEY",
-        "ollama" => "OLLAMA_API_KEY",
-        "sansa" => "SANSA_API_KEY",
-        "deepseek" => "DEEPSEEK_API_KEY",
-        "mistral" => "MISTRAL_API_KEY",
-        "gemini" => "GEMINI_API_KEY",
-        "vllm" => "VLLM_API_KEY",
-        _ => "API_KEY",
-    }
+    opencrust_config::providers::env_var_for_provider(provider)
 }
 
 fn mask_token(s: &str) -> String {
@@ -473,171 +463,140 @@ async fn section_provider(
         }
     }
 
-    // Manual provider selection
-    let providers = &[
-        "anthropic",
-        "openai",
-        "ollama",
-        "sansa",
-        "deepseek",
-        "mistral",
-        "gemini",
-        "vllm",
-    ];
+    // Manual provider selection - driven by the provider registry
+    use opencrust_config::providers::KNOWN_PROVIDERS;
+
+    let display_names: Vec<&str> = KNOWN_PROVIDERS.iter().map(|p| p.display_name).collect();
     let default_idx = existing_provider
         .as_deref()
-        .and_then(|p| providers.iter().position(|&x| x == p))
+        .and_then(|ep| KNOWN_PROVIDERS.iter().position(|p| p.id == ep))
         .unwrap_or(0);
     let selection = Select::new()
         .with_prompt("Select your LLM provider")
-        .items(providers)
+        .items(&display_names)
         .default(default_idx)
         .interact()
         .context("provider selection cancelled")?;
-    let provider = providers[selection];
-    let env_hint = env_var_for_provider(provider);
+    let known = &KNOWN_PROVIDERS[selection];
+    let env_hint = known.env_var;
 
-    // Base URL (optional)
+    // Existing config values
     let existing_base_url = existing
         .as_ref()
         .and_then(|c| c.llm.get("main"))
         .and_then(|p| p.base_url.as_ref())
         .map(|s| s.as_str());
+    let existing_model = existing
+        .as_ref()
+        .and_then(|c| c.llm.get("main"))
+        .and_then(|p| p.model.as_deref());
 
-    let base_url_prompt = if let Some(existing) = existing_base_url {
-        format!("Custom base URL (optional, Enter to keep: {})", existing)
+    // Base URL - local providers always show it, cloud providers gate behind "Advanced"
+    let base_url = if known.is_local {
+        let default = existing_base_url
+            .or(known.default_base_url)
+            .unwrap_or("http://localhost");
+        let input: String = Input::new()
+            .with_prompt(format!("Base URL [{}]", default))
+            .default(default.to_string())
+            .allow_empty(true)
+            .validate_with(|input: &String| -> Result<(), String> {
+                if input.is_empty() {
+                    return Ok(());
+                }
+                validate_base_url(input).map_err(|e| e.to_string())
+            })
+            .interact_text()
+            .context("base URL input cancelled")?;
+        let url = input.trim();
+        if url.is_empty() {
+            known.default_base_url.map(|s| s.to_string())
+        } else {
+            Some(url.to_string())
+        }
     } else {
-        "Custom base URL (optional, Enter to skip)".to_string()
-    };
+        let show_advanced = Confirm::new()
+            .with_prompt("Advanced options? (custom endpoint, proxy)")
+            .default(false)
+            .interact()
+            .unwrap_or(false);
 
-    let base_url: String = Input::new()
-        .with_prompt(&base_url_prompt)
-        .allow_empty(true)
-        .validate_with(|input: &String| -> Result<(), String> {
-            if input.is_empty() {
-                return Ok(());
+        if show_advanced {
+            let default = existing_base_url.unwrap_or("");
+            let input: String = Input::new()
+                .with_prompt("API endpoint URL (Enter for default)")
+                .default(default.to_string())
+                .allow_empty(true)
+                .validate_with(|input: &String| -> Result<(), String> {
+                    if input.is_empty() {
+                        return Ok(());
+                    }
+                    validate_base_url(input).map_err(|e| e.to_string())
+                })
+                .interact_text()
+                .context("base URL input cancelled")?;
+            if input.trim().is_empty() {
+                None
+            } else {
+                Some(input.trim().to_string())
             }
-            validate_base_url(input).map_err(|e| e.to_string())
-        })
-        .interact_text()
-        .context("base URL input cancelled")?;
-
-    let base_url = if base_url.trim().is_empty() {
-        existing_base_url.map(|s| s.to_string())
-    } else {
-        Some(base_url.trim().to_string())
+        } else {
+            existing_base_url.map(|s| s.to_string())
+        }
     };
 
-    if let Some(ref url) = base_url {
-        println!("  Using custom base URL: {}", url);
-    }
-
-    // Ollama: ask for model, default base URL, no API key, ping server
-    if provider == "ollama" {
-        let existing_model = existing
-            .as_ref()
-            .and_then(|c| c.llm.get("main"))
-            .and_then(|p| p.model.as_deref());
-
-        let model_input: String = Input::new()
+    // Model - prompt if provider is local (user picks which model to run)
+    let model = if known.is_local {
+        let default_model = existing_model.or(known.default_model).unwrap_or("");
+        let input: String = Input::new()
             .with_prompt("Model name")
-            .default("llama3.1".to_string())
+            .default(default_model.to_string())
+            .allow_empty(!default_model.is_empty())
             .interact_text()
             .context("model name input cancelled")?;
-
-        let model = if model_input.trim().is_empty() {
-            existing_model.map(|s| s.to_string())
+        let m = input.trim();
+        if m.is_empty() {
+            known.default_model.map(|s| s.to_string())
         } else {
-            Some(model_input.trim().to_string())
-        };
+            Some(m.to_string())
+        }
+    } else {
+        None
+    };
 
+    // API key - skip for providers that don't need one
+    if !known.requires_api_key {
+        // Test connectivity for local providers
         let effective_url = base_url
             .as_deref()
-            .unwrap_or("http://localhost:11434")
-            .to_string();
-
-        print!("  Testing Ollama connection... ");
-        match validate_llm_key("ollama", "unused", Some(&effective_url)).await {
+            .or(known.default_base_url)
+            .unwrap_or("http://localhost");
+        print!("  Testing {} connection... ", known.display_name);
+        match validate_llm_key(known.id, "unused", Some(effective_url)).await {
             Ok(true) => println!("connected"),
-            Ok(false) => println!("unreachable (start Ollama first: `ollama serve`)"),
+            Ok(false) => println!("unreachable"),
             Err(e) => println!("skipped ({e})"),
         }
 
         return Ok(Some(ProviderResult {
-            provider: provider.to_string(),
+            provider: known.id.to_string(),
             api_key: String::new(),
             model,
-            base_url: Some(effective_url),
-            from_env: true, // no key to store
-            verified: false,
-        }));
-    }
-
-    // vLLM: ask for model name (required) then optional API key, then ping server
-    if provider == "vllm" {
-        let existing_model = existing
-            .as_ref()
-            .and_then(|c| c.llm.get("main"))
-            .and_then(|p| p.model.as_deref());
-
-        let model_prompt = if let Some(m) = existing_model {
-            format!("Model name (Enter to keep: {m})")
-        } else {
-            "Model name (e.g. Qwen/Qwen2.5-7B-Instruct)".to_string()
-        };
-
-        let model_input: String = Input::new()
-            .with_prompt(&model_prompt)
-            .allow_empty(existing_model.is_some())
-            .interact_text()
-            .context("model name input cancelled")?;
-
-        let model = if model_input.trim().is_empty() {
-            existing_model.map(|s| s.to_string())
-        } else {
-            Some(model_input.trim().to_string())
-        };
-
-        let api_key_input: String = Password::new()
-            .with_prompt("API key (optional, Enter to skip)")
-            .allow_empty_password(true)
-            .interact()
-            .context("API key input cancelled")?;
-        let api_key = api_key_input.trim().to_string();
-
-        let effective_key = if api_key.is_empty() {
-            "EMPTY".to_string()
-        } else {
-            api_key.clone()
-        };
-
-        print!("  Testing vLLM connection... ");
-        let effective_url = base_url
-            .as_deref()
-            .unwrap_or("http://localhost:8000")
-            .to_string();
-        match validate_llm_key("vllm", &effective_key, Some(&effective_url)).await {
-            Ok(true) => println!("connected"),
-            Ok(false) => println!("unreachable (start vLLM first, or check base_url)"),
-            Err(e) => println!("skipped ({e})"),
-        }
-
-        return Ok(Some(ProviderResult {
-            provider: provider.to_string(),
-            api_key,
-            model,
             base_url,
-            from_env: false,
+            from_env: true,
             verified: false,
         }));
     }
 
     // API key entry with retry loop
+    let provider_id = known.id;
     loop {
         let key_prompt = if existing_has_key {
-            format!("{provider} API key (Enter to keep existing, or set {env_hint} env var later)")
+            format!(
+                "{provider_id} API key (Enter to keep existing, or set {env_hint} env var later)"
+            )
         } else {
-            format!("{provider} API key (or set {env_hint} env var later)")
+            format!("{provider_id} API key (or set {env_hint} env var later)")
         };
 
         let api_key: String = Password::new()
@@ -656,7 +615,7 @@ async fn section_provider(
                 .unwrap_or_default();
             println!("  Keeping existing API key.");
             return Ok(Some(ProviderResult {
-                provider: provider.to_string(),
+                provider: provider_id.to_string(),
                 api_key: old_key,
                 model: None,
                 base_url: base_url.clone(),
@@ -669,7 +628,7 @@ async fn section_provider(
         if api_key.is_empty() {
             println!("  Set {env_hint} environment variable before starting the server.");
             return Ok(Some(ProviderResult {
-                provider: provider.to_string(),
+                provider: provider_id.to_string(),
                 api_key: String::new(),
                 model: None,
                 base_url,
@@ -679,12 +638,12 @@ async fn section_provider(
         }
 
         // Validate the key
-        print!("  Testing {provider} connection... ");
-        match validate_llm_key(provider, &api_key, base_url.as_deref()).await {
+        print!("  Testing {provider_id} connection... ");
+        match validate_llm_key(provider_id, &api_key, base_url.as_deref()).await {
             Ok(true) => {
                 println!("connected");
                 return Ok(Some(ProviderResult {
-                    provider: provider.to_string(),
+                    provider: provider_id.to_string(),
                     api_key,
                     model: None,
                     base_url: base_url.clone(),
@@ -701,7 +660,7 @@ async fn section_provider(
                     .unwrap_or(false);
                 if !retry {
                     return Ok(Some(ProviderResult {
-                        provider: provider.to_string(),
+                        provider: provider_id.to_string(),
                         api_key,
                         model: None,
                         base_url: base_url.clone(),
@@ -719,7 +678,7 @@ async fn section_provider(
                     .unwrap_or(false);
                 if !retry {
                     return Ok(Some(ProviderResult {
-                        provider: provider.to_string(),
+                        provider: provider_id.to_string(),
                         api_key,
                         model: None,
                         base_url: base_url.clone(),

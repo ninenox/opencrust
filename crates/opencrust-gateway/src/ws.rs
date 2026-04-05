@@ -306,6 +306,17 @@ async fn process_text_message(
 
     // Input validation
     let user_text = opencrust_security::InputValidator::sanitize(&user_text);
+    let guardrails = state.current_config().guardrails.clone();
+    if opencrust_security::InputValidator::exceeds_length(&user_text, guardrails.max_input_chars) {
+        let err = serde_json::json!({
+            "type": "error",
+            "session_id": session_id,
+            "code": "input_too_long",
+            "message": format!("input rejected: message exceeds {} character limit", guardrails.max_input_chars),
+        });
+        let _ = sender.send(Message::Text(err.to_string().into())).await;
+        return None;
+    }
     if opencrust_security::InputValidator::check_prompt_injection(&user_text) {
         warn!("prompt injection detected: session={}", session_id);
         let err = serde_json::json!({
@@ -317,6 +328,28 @@ async fn process_text_message(
         let _ = sender.send(Message::Text(err.to_string().into())).await;
         return None;
     }
+
+    // Token budget check (use session_id as user identity for web sessions)
+    if let Err(e) = state
+        .check_token_budget(session_id, session_id, &guardrails)
+        .await
+    {
+        let err = serde_json::json!({
+            "type": "error",
+            "session_id": session_id,
+            "code": "budget_exceeded",
+            "message": e,
+        });
+        let _ = sender.send(Message::Text(err.to_string().into())).await;
+        return None;
+    }
+
+    // Apply tool allowlist and per-session tool call budget
+    state.agents.set_session_tool_config(
+        session_id,
+        guardrails.allowed_tools.clone(),
+        guardrails.session_tool_call_budget,
+    );
 
     // Ensure session exists and hydrate persisted history for web chat.
     state
@@ -348,6 +381,11 @@ async fn process_text_message(
                 state.update_session_summary(session_id, &s);
             }
 
+            let response_text = opencrust_security::InputValidator::truncate_output(
+                &response_text,
+                guardrails.max_output_chars,
+            );
+
             state
                 .persist_turn(
                     session_id,
@@ -367,11 +405,17 @@ async fn process_text_message(
                     .await;
             }
 
-            serde_json::json!({
+            let mut msg = serde_json::json!({
                 "type": "message",
                 "session_id": session_id,
                 "content": response_text,
-            })
+            });
+            if let Some(debug_info) = state.agents.take_debug_info(session_id) {
+                msg["debug"] = serde_json::json!({
+                    "tools": debug_info,
+                });
+            }
+            msg
         }
         Err(e) => {
             warn!("agent error: session={}, error={}", session_id, e);

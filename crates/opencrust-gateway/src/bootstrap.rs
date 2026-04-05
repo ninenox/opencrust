@@ -1163,6 +1163,10 @@ pub fn build_telegram_channels(
             "VOICE_API_KEY",
             "VOICE_API_KEY",
         );
+        let data_dir = config
+            .data_dir
+            .clone()
+            .unwrap_or_else(|| opencrust_config::ConfigLoader::default_config_dir().join("data"));
 
         let on_message: opencrust_channels::OnMessageFn = Arc::new(
             move |chat_id: i64,
@@ -1183,10 +1187,73 @@ pub fn build_telegram_channels(
                 let stt_base_url = stt_base_url.clone();
                 let stt_model = stt_model.clone();
                 let stt_api_key = stt_api_key.clone();
+                let data_dir = data_dir.clone();
                 Box::pin(async move {
                     // --- Command handling (text-only) ---
                     if let Some(cmd) = text.strip_prefix('/') {
                         let cmd = cmd.split_whitespace().next().unwrap_or("");
+
+                        // /ingest - async, needs data_dir and embedding provider
+                        if cmd == "ingest" {
+                            let session_id = format!("telegram-{chat_id}");
+                            if let Some(pending) = state.take_pending_file(&session_id) {
+                                let doc_store =
+                                    opencrust_db::DocumentStore::open(&data_dir.join("memory.db"))
+                                        .map_err(|e| {
+                                            format!("failed to open document store: {e}")
+                                        })?;
+
+                                let embed = state.agents.embedding_provider();
+                                let replace = text.to_lowercase().contains("replace");
+
+                                return match crate::ingest::ingest_from_bytes(
+                                    &pending.filename,
+                                    &pending.data,
+                                    &doc_store,
+                                    embed.as_deref(),
+                                    replace,
+                                )
+                                .await
+                                {
+                                    Ok(result) => {
+                                        let action = if result.replaced {
+                                            "Replaced"
+                                        } else {
+                                            "Ingested"
+                                        };
+                                        let embed_note = if result.has_embeddings {
+                                            " with embeddings"
+                                        } else {
+                                            ""
+                                        };
+                                        Ok(format!(
+                                            "{action} {} ({} chunks{embed_note}). You can now ask me anything about this document.",
+                                            pending.filename, result.chunk_count
+                                        ))
+                                    }
+                                    Err(e) => {
+                                        let msg = e.to_string();
+                                        if msg.contains("already ingested") {
+                                            Ok(format!(
+                                                "{} is already ingested. Use /ingest replace to update it.",
+                                                pending.filename
+                                            ))
+                                        } else {
+                                            Err(format!(
+                                                "Failed to ingest {}: {msg}",
+                                                pending.filename
+                                            ))
+                                        }
+                                    }
+                                };
+                            } else {
+                                return Ok(
+                                    "No pending file. Send a document first, then use /ingest."
+                                        .to_string(),
+                                );
+                            }
+                        }
+
                         return handle_command(
                             cmd, &text, &user_id, &user_name, chat_id, &allowlist, &pairing,
                             &policy, &state,
@@ -1291,6 +1358,10 @@ pub fn build_telegram_channels(
                                 state.update_session_summary(&session_id, &s);
                             }
 
+                            let response = opencrust_security::InputValidator::truncate_output(
+                                &response,
+                                max_output_chars,
+                            );
                             state
                                 .persist_turn(
                                     &session_id,
@@ -1334,8 +1405,23 @@ pub fn build_telegram_channels(
                             use base64::Engine;
                             let b64 = base64::engine::general_purpose::STANDARD.encode(&data);
                             let data_url = format!("data:image/jpeg;base64,{b64}");
-                            let caption_text =
-                                caption.unwrap_or_else(|| "Describe this image.".to_string());
+                            let caption_text = opencrust_security::InputValidator::sanitize(
+                                &caption.unwrap_or_else(|| "Describe this image.".to_string()),
+                            );
+                            if opencrust_security::InputValidator::exceeds_length(
+                                &caption_text,
+                                max_input_chars,
+                            ) {
+                                return Err(format!(
+                                    "input rejected: message exceeds {max_input_chars} character limit"
+                                ));
+                            }
+                            if opencrust_security::InputValidator::check_prompt_injection(
+                                &caption_text,
+                            ) {
+                                return Err("input rejected: potential prompt injection detected"
+                                    .to_string());
+                            }
 
                             let blocks = vec![
                                 opencrust_agents::ContentBlock::Image { url: data_url },
@@ -1389,6 +1475,10 @@ pub fn build_telegram_channels(
                                 state.update_session_summary(&session_id, &s);
                             }
 
+                            let response = opencrust_security::InputValidator::truncate_output(
+                                &response,
+                                max_output_chars,
+                            );
                             state
                                 .persist_turn(
                                     &session_id,
@@ -1423,100 +1513,68 @@ pub fn build_telegram_channels(
                             }
 
                             let fname = filename.unwrap_or_else(|| "file".to_string());
-                            let ext = fname.rsplit('.').next().unwrap_or("").to_lowercase();
-                            let text_exts = [
-                                "txt", "md", "json", "csv", "log", "py", "rs", "js", "ts", "toml",
-                                "yaml", "yml", "xml", "html",
-                            ];
+                            let caption_text = caption.unwrap_or_default().trim().to_lowercase();
 
-                            if !text_exts.contains(&ext.as_str()) {
-                                return Err(format!(
-                                    "Unsupported file type (.{ext}). Supported: \
-                                     txt, md, json, csv, py, rs, js, ts, toml, yaml, yml, xml, html"
-                                ));
-                            }
+                            // If caption contains "ingest", ingest immediately
+                            if caption_text.contains("ingest") {
+                                let doc_store =
+                                    opencrust_db::DocumentStore::open(&data_dir.join("memory.db"))
+                                        .map_err(|e| {
+                                            format!("failed to open document store: {e}")
+                                        })?;
 
-                            let file_content = String::from_utf8(data).map_err(|_| {
-                                "File does not appear to be valid UTF-8 text.".to_string()
-                            })?;
-                            let user_text = format!(
-                                "```{fname}\n{file_content}\n```\n\n{}",
-                                caption.unwrap_or_default()
-                            );
+                                let embed = state.agents.embedding_provider();
+                                let replace = caption_text.contains("replace");
 
-                            let text = opencrust_security::InputValidator::sanitize(&user_text);
-                            if opencrust_security::InputValidator::check_prompt_injection(&text) {
-                                return Err("input rejected: potential prompt injection detected"
-                                    .to_string());
-                            }
-                            if opencrust_security::InputValidator::exceeds_length(
-                                &text,
-                                max_input_chars,
-                            ) {
-                                return Err(format!(
-                                    "input rejected: message exceeds {max_input_chars} character limit"
-                                ));
-                            }
-
-                            state
-                                .hydrate_session_history(
-                                    &session_id,
-                                    Some("telegram"),
-                                    Some(&user_id),
+                                match crate::ingest::ingest_from_bytes(
+                                    &fname,
+                                    &data,
+                                    &doc_store,
+                                    embed.as_deref(),
+                                    replace,
                                 )
-                                .await;
-                            let history: Vec<ChatMessage> = state.session_history(&session_id);
-                            let continuity_key = state.continuity_key(Some(&user_id));
-                            let summary = state.session_summary(&session_id);
-
-                            let (response, new_summary) = if let Some(delta_sender) = delta_tx {
-                                state
-                                    .agents
-                                    .process_message_streaming_with_context_and_summary(
-                                        &session_id,
-                                        &text,
-                                        &history,
-                                        delta_sender,
-                                        summary.as_deref(),
-                                        continuity_key.as_deref(),
-                                        Some(&user_id),
-                                    )
-                                    .await
+                                .await
+                                {
+                                    Ok(result) => {
+                                        let action = if result.replaced {
+                                            "Replaced"
+                                        } else {
+                                            "Ingested"
+                                        };
+                                        let embed_note = if result.has_embeddings {
+                                            " with embeddings"
+                                        } else {
+                                            ""
+                                        };
+                                        Ok(format!(
+                                            "{action} {fname} ({} chunks{embed_note}). You can now ask me anything about this document.",
+                                            result.chunk_count
+                                        ))
+                                    }
+                                    Err(e) => {
+                                        let msg = e.to_string();
+                                        if msg.contains("already ingested") {
+                                            Ok(format!(
+                                                "{fname} is already ingested. Send it again with caption \"ingest replace\" to update it."
+                                            ))
+                                        } else {
+                                            Err(format!("Failed to ingest {fname}: {msg}"))
+                                        }
+                                    }
+                                }
                             } else {
-                                state
-                                    .agents
-                                    .process_message_with_context_and_summary(
-                                        &session_id,
-                                        &text,
-                                        &history,
-                                        summary.as_deref(),
-                                        continuity_key.as_deref(),
-                                        Some(&user_id),
-                                    )
-                                    .await
-                            }
-                            .map_err(|e| e.to_string())?;
-
-                            if let Some(s) = new_summary {
-                                state.update_session_summary(&session_id, &s);
-                            }
-
-                            state
-                                .persist_turn(
+                                // Store as pending and prompt
+                                state.set_pending_file(
                                     &session_id,
-                                    Some("telegram"),
-                                    Some(&user_id),
-                                    &text,
-                                    &response,
-                                    Some(serde_json::json!({"telegram_chat_id": chat_id})),
-                                )
-                                .await;
-                            if let Some((input, output, provider, model)) =
-                                state.agents.take_session_usage(&session_id)
-                            {
-                                state
-                                    .persist_usage(&session_id, &provider, &model, input, output)
-                                    .await;
+                                    crate::state::PendingFile {
+                                        filename: fname.clone(),
+                                        data,
+                                        received_at: std::time::Instant::now(),
+                                    },
+                                );
+                                Ok(format!(
+                                    "Received {fname}. Use /ingest to store it for future reference."
+                                ))
                             }
                             let response = opencrust_security::InputValidator::truncate_output(
                                 &response,
@@ -1525,7 +1583,7 @@ pub fn build_telegram_channels(
                             Ok(ChannelResponse::Text(response))
                         }
                         None => {
-                            // Existing text-only path
+                            // Regular text-only path
                             let text = opencrust_security::InputValidator::sanitize(&text);
                             if opencrust_security::InputValidator::check_prompt_injection(&text) {
                                 return Err("input rejected: potential prompt injection detected"
@@ -1583,6 +1641,10 @@ pub fn build_telegram_channels(
                                 state.update_session_summary(&session_id, &s);
                             }
 
+                            let response = opencrust_security::InputValidator::truncate_output(
+                                &response,
+                                max_output_chars,
+                            );
                             state
                                 .persist_turn(
                                     &session_id,
@@ -1670,7 +1732,8 @@ fn handle_command(
             }
             let mut help = "OpenCrust Commands:\n\
                 /help - show this help\n\
-                /clear - reset conversation history"
+                /clear - reset conversation history\n\
+                /ingest - store a sent document for future reference"
                 .to_string();
             if is_owner {
                 help.push_str(
@@ -1779,7 +1842,8 @@ fn handle_discord_command(
             }
             let mut help = "OpenCrust Commands:\n\
                 /help - show this help\n\
-                /clear - reset conversation history"
+                /clear - reset conversation history\n\
+                /ingest - store a sent document for future reference"
                 .to_string();
             if is_owner {
                 help.push_str(
@@ -2005,6 +2069,10 @@ pub fn build_slack_channels(
                         state.update_session_summary(&session_id, &s);
                     }
 
+                    let response = opencrust_security::InputValidator::truncate_output(
+                        &response,
+                        max_output_chars,
+                    );
                     state
                         .persist_turn(
                             &session_id,
@@ -2024,10 +2092,6 @@ pub fn build_slack_channels(
                             .await;
                     }
 
-                    let response = opencrust_security::InputValidator::truncate_output(
-                        &response,
-                        max_output_chars,
-                    );
                     Ok(response)
                 })
             },
@@ -2228,6 +2292,10 @@ pub fn build_whatsapp_channels(
                         state.update_session_summary(&session_id, &s);
                     }
 
+                    let response = opencrust_security::InputValidator::truncate_output(
+                        &response,
+                        max_output_chars,
+                    );
                     state
                         .persist_turn(
                             &session_id,
@@ -2247,10 +2315,6 @@ pub fn build_whatsapp_channels(
                             .await;
                     }
 
-                    let response = opencrust_security::InputValidator::truncate_output(
-                        &response,
-                        max_output_chars,
-                    );
                     Ok(response)
                 })
             },
@@ -2436,6 +2500,10 @@ pub fn build_whatsapp_web_channels(
                         state.update_session_summary(&session_id, &s);
                     }
 
+                    let response = opencrust_security::InputValidator::truncate_output(
+                        &response,
+                        max_output_chars,
+                    );
                     state
                         .persist_turn(
                             &session_id,
@@ -2455,10 +2523,6 @@ pub fn build_whatsapp_web_channels(
                             .await;
                     }
 
-                    let response = opencrust_security::InputValidator::truncate_output(
-                        &response,
-                        max_output_chars,
-                    );
                     Ok(response)
                 })
             },
@@ -2605,6 +2669,10 @@ pub fn build_imessage_channels(
                         state.update_session_summary(&session_id, &s);
                     }
 
+                    let response = opencrust_security::InputValidator::truncate_output(
+                        &response,
+                        max_output_chars,
+                    );
                     state
                         .persist_turn(
                             &session_id,
@@ -2624,10 +2692,6 @@ pub fn build_imessage_channels(
                             .await;
                     }
 
-                    let response = opencrust_security::InputValidator::truncate_output(
-                        &response,
-                        max_output_chars,
-                    );
                     Ok(response)
                 })
             },
@@ -2814,6 +2878,10 @@ pub fn build_line_channels(
                         state.update_session_summary(&session_id, &s);
                     }
 
+                    let response = opencrust_security::InputValidator::truncate_output(
+                        &response,
+                        max_output_chars,
+                    );
                     state
                         .persist_turn(
                             &session_id,
@@ -2833,10 +2901,6 @@ pub fn build_line_channels(
                             .await;
                     }
 
-                    let response = opencrust_security::InputValidator::truncate_output(
-                        &response,
-                        max_output_chars,
-                    );
                     Ok(response)
                 })
             },
@@ -3019,6 +3083,10 @@ pub fn build_wechat_channels(
                         state.update_session_summary(&session_id, &s);
                     }
 
+                    let response = opencrust_security::InputValidator::truncate_output(
+                        &response,
+                        max_output_chars,
+                    );
                     state
                         .persist_turn(
                             &session_id,
@@ -3038,10 +3106,6 @@ pub fn build_wechat_channels(
                             .await;
                     }
 
-                    let response = opencrust_security::InputValidator::truncate_output(
-                        &response,
-                        max_output_chars,
-                    );
                     Ok(response)
                 })
             },

@@ -53,12 +53,10 @@ impl GatewayServer {
         state.mcp_manager_arc = Some(Arc::clone(&mcp_manager_arc));
 
         // Initialize persistent session storage used by channel memory bus hydration.
-        let data_dir = state
-            .config
-            .data_dir
-            .clone()
-            .or_else(|| dirs::home_dir().map(|h| h.join(".opencrust").join("data")))
-            .unwrap_or_else(|| ".opencrust/data".into());
+        let data_dir =
+            state.config.data_dir.clone().unwrap_or_else(|| {
+                opencrust_config::ConfigLoader::default_config_dir().join("data")
+            });
         if let Err(e) = std::fs::create_dir_all(&data_dir) {
             warn!("failed to create data directory: {e}");
         }
@@ -535,6 +533,14 @@ async fn execute_scheduled_task(
     let continuity_key = state
         .continuity_key(Some(task.user_id.as_str()))
         .map(|k| k.as_str().to_string());
+
+    // Apply tool allowlist and per-session tool call budget for scheduled tasks
+    let guardrails = state.current_config().guardrails.clone();
+    state.agents.set_session_tool_config(
+        &task.session_id,
+        guardrails.allowed_tools.clone(),
+        guardrails.session_tool_call_budget,
+    );
 
     let response_text = state
         .agents
