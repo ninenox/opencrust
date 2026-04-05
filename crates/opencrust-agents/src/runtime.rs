@@ -1118,6 +1118,7 @@ impl AgentRuntime {
                             None => ToolOutput::error(format!("unknown tool: {}", name)),
                         },
                     };
+                    self.record_debug_tool_call(session_id, name, &input.to_string());
                     tool_results.push(ContentBlock::ToolResult {
                         tool_use_id: id.clone(),
                         content: output.content,
@@ -1654,6 +1655,7 @@ impl AgentRuntime {
                             None => ToolOutput::error(format!("unknown tool: {}", name)),
                         },
                     };
+                    self.record_debug_tool_call(session_id, name, &input.to_string());
                     tool_results.push(ContentBlock::ToolResult {
                         tool_use_id: id.clone(),
                         content: output.content,
