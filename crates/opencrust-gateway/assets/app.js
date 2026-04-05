@@ -323,6 +323,11 @@ function handleServerEvent(raw) {
       break;
     case "message":
       appendOrUpdateStreamMessage("assistant", evt.content || "(empty response)");
+      if (evt.debug) {
+        const tools = evt.debug.tools || [];
+        const label = tools.length > 0 ? tools.join(", ") : "no tools called";
+        appendMessage("sys", `[debug] ${label}`);
+      }
       break;
     case "error":
       setAgentThinking(false);

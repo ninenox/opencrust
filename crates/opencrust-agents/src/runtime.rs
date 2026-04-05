@@ -39,8 +39,10 @@ pub struct AgentRuntime {
     /// Per-session tool configuration: (allowed_tools, call_count, budget).
     /// `allowed_tools = None` means all tools allowed.
     session_tool_config: DashMap<String, SessionToolConfig>,
-    /// When true, append debug info (tool calls, RAG scores) to responses.
+    /// When true, accumulate debug info (tool calls) per session.
     debug: bool,
+    /// Debug info accumulated during message processing, keyed by session_id.
+    debug_accumulator: Mutex<HashMap<String, Vec<String>>>,
 }
 
 /// Per-session tool configuration set before processing a message.
@@ -68,6 +70,7 @@ impl AgentRuntime {
             usage_accumulator: Mutex::new(HashMap::new()),
             session_tool_config: DashMap::new(),
             debug: false,
+            debug_accumulator: Mutex::new(HashMap::new()),
         }
     }
 
@@ -411,17 +414,33 @@ impl AgentRuntime {
             .map(|t| t.as_ref())
     }
 
-    /// Append debug footer to response if debug mode is enabled.
-    fn append_debug_footer(&self, response: &mut String, tool_calls: &[String]) {
+    /// Record a tool call for debug output.
+    fn record_debug_tool_call(&self, session_id: &str, name: &str, input_snippet: &str) {
         if !self.debug {
             return;
         }
-        response.push_str("\n\n---\n`[debug]` ");
-        if tool_calls.is_empty() {
-            response.push_str("no tools called");
+        let entry = if input_snippet.len() > 80 {
+            format!("{name}({}...)", &input_snippet[..80])
         } else {
-            response.push_str(&format!("tools: {}", tool_calls.join(", ")));
+            format!("{name}({input_snippet})")
+        };
+        let mut acc = self
+            .debug_accumulator
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        acc.entry(session_id.to_string()).or_default().push(entry);
+    }
+
+    /// Take accumulated debug info for a session. Returns None if debug is off or no data.
+    pub fn take_debug_info(&self, session_id: &str) -> Option<Vec<String>> {
+        if !self.debug {
+            return None;
         }
+        let mut acc = self
+            .debug_accumulator
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        acc.remove(session_id)
     }
 
     /// Run the full conversation loop: recall context, call LLM, execute tools, return response.
@@ -1210,8 +1229,6 @@ impl AgentRuntime {
         trim_messages_to_budget(&mut messages, &system, &tool_defs, max_ctx);
 
         let mut full_response = String::new();
-        let mut debug_tool_calls: Vec<String> = Vec::new();
-
         for _iteration in 0..MAX_TOOL_ITERATIONS {
             let request = LlmRequest {
                 model: String::new(),
@@ -1298,7 +1315,6 @@ impl AgentRuntime {
                             warn!("failed to store turn in memory: {}", e);
                         }
 
-                        self.append_debug_footer(&mut full_response, &debug_tool_calls);
                         return Ok(full_response);
                     }
 
@@ -1347,14 +1363,7 @@ impl AgentRuntime {
                                 None => ToolOutput::error(format!("unknown tool: {}", name)),
                             },
                         };
-                        if self.debug {
-                            let snippet = if input_json.len() > 80 {
-                                format!("{}...", &input_json[..80])
-                            } else {
-                                input_json.clone()
-                            };
-                            debug_tool_calls.push(format!("{name}({snippet})"));
-                        }
+                        self.record_debug_tool_call(session_id, name, input_json);
                         tool_results.push(ContentBlock::ToolResult {
                             tool_use_id: id.clone(),
                             content: output.content,
@@ -1409,7 +1418,6 @@ impl AgentRuntime {
                             warn!("failed to store turn in memory: {}", e);
                         }
 
-                        self.append_debug_footer(&mut full_response, &debug_tool_calls);
                         return Ok(full_response);
                     }
 
@@ -1709,8 +1717,6 @@ impl AgentRuntime {
         };
 
         let mut full_response = String::new();
-        let mut debug_tool_calls: Vec<String> = Vec::new();
-
         for _iteration in 0..MAX_TOOL_ITERATIONS {
             let request = LlmRequest {
                 model: String::new(),
@@ -1795,7 +1801,6 @@ impl AgentRuntime {
                             warn!("failed to store turn in memory: {}", e);
                         }
 
-                        self.append_debug_footer(&mut full_response, &debug_tool_calls);
                         return Ok((full_response, new_summary));
                     }
 
@@ -1842,14 +1847,7 @@ impl AgentRuntime {
                                 None => ToolOutput::error(format!("unknown tool: {}", name)),
                             },
                         };
-                        if self.debug {
-                            let snippet = if input_json.len() > 80 {
-                                format!("{}...", &input_json[..80])
-                            } else {
-                                input_json.clone()
-                            };
-                            debug_tool_calls.push(format!("{name}({snippet})"));
-                        }
+                        self.record_debug_tool_call(session_id, name, input_json);
                         tool_results.push(ContentBlock::ToolResult {
                             tool_use_id: id.clone(),
                             content: output.content,
@@ -1892,7 +1890,6 @@ impl AgentRuntime {
                             warn!("failed to store turn in memory: {}", e);
                         }
 
-                        self.append_debug_footer(&mut full_response, &debug_tool_calls);
                         return Ok((full_response, new_summary));
                     }
 

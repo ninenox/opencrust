@@ -367,11 +367,17 @@ async fn process_text_message(
                     .await;
             }
 
-            serde_json::json!({
+            let mut msg = serde_json::json!({
                 "type": "message",
                 "session_id": session_id,
                 "content": response_text,
-            })
+            });
+            if let Some(debug_info) = state.agents.take_debug_info(session_id) {
+                msg["debug"] = serde_json::json!({
+                    "tools": debug_info,
+                });
+            }
+            msg
         }
         Err(e) => {
             warn!("agent error: session={}, error={}", session_id, e);
