@@ -12,6 +12,13 @@ pub type AudioBytes = Vec<u8>;
 /// OpenAI's hard limit is 4096; we default to 4000 to leave a safe margin.
 pub const TTS_DEFAULT_MAX_CHARS: usize = 4000;
 
+/// Maximum TTS response body size (10 MiB).
+///
+/// A typical 60-second OGG/Opus file is ~500 KB; 10 MiB allows generous
+/// headroom while guarding against runaway responses from a misconfigured or
+/// malicious server.
+const TTS_MAX_RESPONSE_BYTES: usize = 10 * 1024 * 1024;
+
 /// Timeout for TTS HTTP requests (synthesis + body download).
 const TTS_HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -34,6 +41,32 @@ fn tts_http_client() -> reqwest::Client {
         .timeout(TTS_HTTP_TIMEOUT)
         .build()
         .expect("failed to build TTS HTTP client")
+}
+
+/// Read a TTS response body, rejecting payloads larger than `TTS_MAX_RESPONSE_BYTES`.
+///
+/// Checks `Content-Length` first for a fast rejection, then verifies the
+/// actual body size after buffering to guard against servers that omit or
+/// lie about the header.
+async fn read_tts_body(resp: reqwest::Response) -> Result<AudioBytes, String> {
+    if let Some(len) = resp.content_length() {
+        if len > TTS_MAX_RESPONSE_BYTES as u64 {
+            return Err(format!(
+                "tts response too large: Content-Length {len} exceeds {TTS_MAX_RESPONSE_BYTES} byte limit"
+            ));
+        }
+    }
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| format!("tts read body failed: {e}"))?;
+    if bytes.len() > TTS_MAX_RESPONSE_BYTES {
+        return Err(format!(
+            "tts response too large: {} bytes exceeds {TTS_MAX_RESPONSE_BYTES} byte limit",
+            bytes.len()
+        ));
+    }
+    Ok(bytes.to_vec())
 }
 
 // ---------------------------------------------------------------------------
@@ -104,10 +137,7 @@ impl TtsProvider for OpenAiTts {
             return Err(format!("openai tts error {status}: {body}"));
         }
 
-        resp.bytes()
-            .await
-            .map(|b| b.to_vec())
-            .map_err(|e| format!("openai tts read body failed: {e}"))
+        read_tts_body(resp).await
     }
 }
 
@@ -177,10 +207,7 @@ impl TtsProvider for KokoroTts {
             return Err(format!("kokoro tts error {status}: {body}"));
         }
 
-        resp.bytes()
-            .await
-            .map(|b| b.to_vec())
-            .map_err(|e| format!("kokoro tts read body failed: {e}"))
+        read_tts_body(resp).await
     }
 }
 
@@ -352,6 +379,30 @@ mod tests {
         let tts = OpenAiTts::with_base_url("bad-key".into(), None, None, Some(server.uri()));
         let err = tts.synthesize("hello").await.unwrap_err();
         assert!(err.contains("401"), "expected 401 in error: {err}");
+    }
+
+    #[tokio::test]
+    async fn openai_tts_rejects_oversized_response() {
+        let server = MockServer::start().await;
+
+        // Body is exactly one byte over the limit — Content-Length will match.
+        let huge_body = vec![0u8; TTS_MAX_RESPONSE_BYTES + 1];
+        Mock::given(method("POST"))
+            .and(path("/v1/audio/speech"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_bytes(huge_body)
+                    .insert_header("content-type", "audio/ogg"),
+            )
+            .mount(&server)
+            .await;
+
+        let tts = OpenAiTts::with_base_url("sk-test".into(), None, None, Some(server.uri()));
+        let err = tts.synthesize("hello").await.unwrap_err();
+        assert!(
+            err.contains("too large"),
+            "expected 'too large' in error: {err}"
+        );
     }
 
     #[tokio::test]
