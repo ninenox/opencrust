@@ -101,6 +101,29 @@ pub async fn create_task(
             .into_response();
     }
 
+    // Rate limit (use task_id as user identity for A2A callers)
+    let gateway_rate_limit = state.current_config().gateway.rate_limit.clone();
+    if let Err(e) = state.check_user_rate_limit(&task_id, &gateway_rate_limit) {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::json!({ "error": e })),
+        )
+            .into_response();
+    }
+
+    // Token budget check
+    let session_id_for_budget = format!("a2a:{task_id}");
+    if let Err(e) = state
+        .check_token_budget(&session_id_for_budget, &task_id, &guardrails)
+        .await
+    {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::json!({ "error": e })),
+        )
+            .into_response();
+    }
+
     // Create an initial task in "working" status
     let task = A2ATask {
         id: task_id.clone(),
@@ -122,6 +145,13 @@ pub async fn create_task(
         .await;
     let history = state.session_history(&session_id);
     let continuity_key = state.continuity_key(None);
+
+    // Apply tool allowlist and per-session tool call budget
+    state.agents.set_session_tool_config(
+        &session_id,
+        guardrails.allowed_tools.clone(),
+        guardrails.session_tool_call_budget,
+    );
 
     let result = state
         .agents

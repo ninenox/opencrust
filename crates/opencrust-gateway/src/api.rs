@@ -103,6 +103,35 @@ pub async fn send_message(
             .into_response();
     }
 
+    // Rate limit (use session_id as user identity for API sessions)
+    let gateway_rate_limit = state.current_config().gateway.rate_limit.clone();
+    if let Err(e) = state.check_user_rate_limit(&session_id, &gateway_rate_limit) {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::json!({ "error": e })),
+        )
+            .into_response();
+    }
+
+    // Token budget check
+    if let Err(e) = state
+        .check_token_budget(&session_id, &session_id, &guardrails)
+        .await
+    {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::json!({ "error": e })),
+        )
+            .into_response();
+    }
+
+    // Apply tool allowlist and per-session tool call budget
+    state.agents.set_session_tool_config(
+        &session_id,
+        guardrails.allowed_tools.clone(),
+        guardrails.session_tool_call_budget,
+    );
+
     // Hydrate history
     state
         .hydrate_session_history(&session_id, Some("api"), None)

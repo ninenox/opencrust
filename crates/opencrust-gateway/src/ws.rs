@@ -329,6 +329,28 @@ async fn process_text_message(
         return None;
     }
 
+    // Token budget check (use session_id as user identity for web sessions)
+    if let Err(e) = state
+        .check_token_budget(session_id, session_id, &guardrails)
+        .await
+    {
+        let err = serde_json::json!({
+            "type": "error",
+            "session_id": session_id,
+            "code": "budget_exceeded",
+            "message": e,
+        });
+        let _ = sender.send(Message::Text(err.to_string().into())).await;
+        return None;
+    }
+
+    // Apply tool allowlist and per-session tool call budget
+    state.agents.set_session_tool_config(
+        session_id,
+        guardrails.allowed_tools.clone(),
+        guardrails.session_tool_call_budget,
+    );
+
     // Ensure session exists and hydrate persisted history for web chat.
     state
         .hydrate_session_history(session_id, Some("web"), None)
