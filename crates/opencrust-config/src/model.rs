@@ -28,6 +28,10 @@ pub struct AppConfig {
     #[serde(default)]
     pub log_level: Option<String>,
 
+    /// Show debug info (tool calls, RAG scores) in responses. Set via --debug flag.
+    #[serde(default)]
+    pub debug: bool,
+
     #[serde(default)]
     pub mcp: HashMap<String, McpServerConfig>,
 
@@ -54,6 +58,7 @@ impl Default for AppConfig {
             agent: AgentConfig::default(),
             data_dir: None,
             log_level: Some("info".to_string()),
+            debug: false,
             mcp: HashMap::new(),
             agents: HashMap::new(),
             tools: ToolsConfig::default(),

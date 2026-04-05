@@ -568,6 +568,10 @@ pub fn build_agent_runtime(config: &AppConfig) -> AgentRuntime {
     if let Some(enabled) = config.memory.summarization {
         runtime.set_summarization_enabled(enabled);
     }
+    if config.debug {
+        runtime.set_debug(true);
+        info!("debug mode enabled: tool calls will be shown in responses");
+    }
 
     // --- Skills ---
     let skills_dir = opencrust_config::ConfigLoader::default_config_dir().join("skills");

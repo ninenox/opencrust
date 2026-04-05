@@ -20,5 +20,10 @@ Thumbs.db
 
 # Config (local secrets)
 credentials/
-
 config.yml
+
+# Node.js (WhatsApp Web sidecar)
+node_modules/
+
+# Local test files
+rag/

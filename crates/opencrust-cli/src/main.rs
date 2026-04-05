@@ -43,6 +43,10 @@ enum Commands {
         /// Run as a background daemon
         #[arg(long, short = 'd')]
         daemon: bool,
+
+        /// Show debug info in responses (tool calls, RAG scores, provider)
+        #[arg(long)]
+        debug: bool,
     },
 
     /// Stop the running daemon
@@ -481,10 +485,13 @@ async fn async_main(
     init_tracing: impl Fn(&str),
 ) -> Result<()> {
     match cli.command {
-        Commands::Start { host, port, .. } => {
+        Commands::Start {
+            host, port, debug, ..
+        } => {
             let mut config = config;
             config.gateway.host = host.clone();
             config.gateway.port = port;
+            config.debug = debug;
             init_tracing(&cli.log_level);
 
             // If no config file exists and we're in a terminal, offer to run the wizard
@@ -949,11 +956,9 @@ async fn async_main(
         }
         Commands::Doc { action } => {
             init_tracing(&cli.log_level);
-            let data_dir = config
-                .data_dir
-                .clone()
-                .or_else(|| dirs::home_dir().map(|h| h.join(".opencrust").join("data")))
-                .unwrap_or_else(|| ".opencrust/data".into());
+            let data_dir = config.data_dir.clone().unwrap_or_else(|| {
+                opencrust_config::ConfigLoader::default_config_dir().join("data")
+            });
             std::fs::create_dir_all(&data_dir).ok();
             let memory_db_path = data_dir.join("memory.db");
 

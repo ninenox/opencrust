@@ -39,6 +39,8 @@ pub struct AgentRuntime {
     /// Per-session tool configuration: (allowed_tools, call_count, budget).
     /// `allowed_tools = None` means all tools allowed.
     session_tool_config: DashMap<String, SessionToolConfig>,
+    /// When true, append debug info (tool calls, RAG scores) to responses.
+    debug: bool,
 }
 
 /// Per-session tool configuration set before processing a message.
@@ -65,6 +67,7 @@ impl AgentRuntime {
             summarization_enabled: true,
             usage_accumulator: Mutex::new(HashMap::new()),
             session_tool_config: DashMap::new(),
+            debug: false,
         }
     }
 
@@ -284,6 +287,14 @@ impl AgentRuntime {
         self.embeddings.clone()
     }
 
+    pub fn set_debug(&mut self, debug: bool) {
+        self.debug = debug;
+    }
+
+    pub fn debug(&self) -> bool {
+        self.debug
+    }
+
     pub async fn on_session_start(
         &self,
         session_id: &str,
@@ -398,6 +409,19 @@ impl AgentRuntime {
             .iter()
             .find(|t| t.name() == name)
             .map(|t| t.as_ref())
+    }
+
+    /// Append debug footer to response if debug mode is enabled.
+    fn append_debug_footer(&self, response: &mut String, tool_calls: &[String]) {
+        if !self.debug {
+            return;
+        }
+        response.push_str("\n\n---\n`[debug]` ");
+        if tool_calls.is_empty() {
+            response.push_str("no tools called");
+        } else {
+            response.push_str(&format!("tools: {}", tool_calls.join(", ")));
+        }
     }
 
     /// Run the full conversation loop: recall context, call LLM, execute tools, return response.
@@ -1186,6 +1210,7 @@ impl AgentRuntime {
         trim_messages_to_budget(&mut messages, &system, &tool_defs, max_ctx);
 
         let mut full_response = String::new();
+        let mut debug_tool_calls: Vec<String> = Vec::new();
 
         for _iteration in 0..MAX_TOOL_ITERATIONS {
             let request = LlmRequest {
@@ -1273,6 +1298,7 @@ impl AgentRuntime {
                             warn!("failed to store turn in memory: {}", e);
                         }
 
+                        self.append_debug_footer(&mut full_response, &debug_tool_calls);
                         return Ok(full_response);
                     }
 
@@ -1321,6 +1347,14 @@ impl AgentRuntime {
                                 None => ToolOutput::error(format!("unknown tool: {}", name)),
                             },
                         };
+                        if self.debug {
+                            let snippet = if input_json.len() > 80 {
+                                format!("{}...", &input_json[..80])
+                            } else {
+                                input_json.clone()
+                            };
+                            debug_tool_calls.push(format!("{name}({snippet})"));
+                        }
                         tool_results.push(ContentBlock::ToolResult {
                             tool_use_id: id.clone(),
                             content: output.content,
@@ -1375,6 +1409,7 @@ impl AgentRuntime {
                             warn!("failed to store turn in memory: {}", e);
                         }
 
+                        self.append_debug_footer(&mut full_response, &debug_tool_calls);
                         return Ok(full_response);
                     }
 
@@ -1674,6 +1709,7 @@ impl AgentRuntime {
         };
 
         let mut full_response = String::new();
+        let mut debug_tool_calls: Vec<String> = Vec::new();
 
         for _iteration in 0..MAX_TOOL_ITERATIONS {
             let request = LlmRequest {
@@ -1759,6 +1795,7 @@ impl AgentRuntime {
                             warn!("failed to store turn in memory: {}", e);
                         }
 
+                        self.append_debug_footer(&mut full_response, &debug_tool_calls);
                         return Ok((full_response, new_summary));
                     }
 
@@ -1805,6 +1842,14 @@ impl AgentRuntime {
                                 None => ToolOutput::error(format!("unknown tool: {}", name)),
                             },
                         };
+                        if self.debug {
+                            let snippet = if input_json.len() > 80 {
+                                format!("{}...", &input_json[..80])
+                            } else {
+                                input_json.clone()
+                            };
+                            debug_tool_calls.push(format!("{name}({snippet})"));
+                        }
                         tool_results.push(ContentBlock::ToolResult {
                             tool_use_id: id.clone(),
                             content: output.content,
@@ -1847,6 +1892,7 @@ impl AgentRuntime {
                             warn!("failed to store turn in memory: {}", e);
                         }
 
+                        self.append_debug_footer(&mut full_response, &debug_tool_calls);
                         return Ok((full_response, new_summary));
                     }
 
