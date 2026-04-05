@@ -630,4 +630,137 @@ mod tests {
         assert!(!"C12345".starts_with('D'));
         assert!(!"G12345".starts_with('D'));
     }
+
+    // --- SlackFile / file-ingest tests ---
+
+    #[test]
+    fn slack_file_fields_accessible() {
+        let file = SlackFile {
+            filename: "report.pdf".to_string(),
+            data: vec![1, 2, 3],
+            mime_type: Some("application/pdf".to_string()),
+        };
+        assert_eq!(file.filename, "report.pdf");
+        assert_eq!(file.data.len(), 3);
+        assert_eq!(file.mime_type.as_deref(), Some("application/pdf"));
+    }
+
+    #[test]
+    fn slack_file_mime_type_optional() {
+        let file = SlackFile {
+            filename: "data.bin".to_string(),
+            data: vec![],
+            mime_type: None,
+        };
+        assert!(file.mime_type.is_none());
+    }
+
+    #[tokio::test]
+    async fn on_message_callback_receives_slack_file() {
+        // Verify that the SlackOnMessageFn signature accepts Option<SlackFile>
+        // and the file reaches the callback.
+        let on_msg: SlackOnMessageFn =
+            Arc::new(|_ch, _uid, _user, _text, _is_group, file, _delta_tx| {
+                Box::pin(async move {
+                    let name = file
+                        .map(|f| f.filename)
+                        .unwrap_or_else(|| "none".to_string());
+                    Ok(ChannelResponse::Text(name))
+                })
+            });
+
+        let slack_file = SlackFile {
+            filename: "doc.pdf".to_string(),
+            data: vec![0u8; 8],
+            mime_type: Some("application/pdf".to_string()),
+        };
+
+        let result = on_msg(
+            "C123".to_string(),
+            "U456".to_string(),
+            "user".to_string(),
+            "/ingest".to_string(),
+            false,
+            Some(slack_file),
+            None,
+        )
+        .await;
+
+        assert!(matches!(result, Ok(ChannelResponse::Text(t)) if t == "doc.pdf"));
+    }
+
+    #[tokio::test]
+    async fn on_message_callback_with_no_file() {
+        let on_msg: SlackOnMessageFn =
+            Arc::new(|_ch, _uid, _user, _text, _is_group, file, _delta_tx| {
+                Box::pin(async move {
+                    let name = file
+                        .map(|f| f.filename)
+                        .unwrap_or_else(|| "none".to_string());
+                    Ok(ChannelResponse::Text(name))
+                })
+            });
+
+        let result = on_msg(
+            "C123".to_string(),
+            "U456".to_string(),
+            "user".to_string(),
+            "hello".to_string(),
+            false,
+            None,
+            None,
+        )
+        .await;
+
+        assert!(matches!(result, Ok(ChannelResponse::Text(t)) if t == "none"));
+    }
+
+    // --- TTS / ChannelResponse degradation tests ---
+
+    #[test]
+    fn voice_response_text_extracted_for_slack() {
+        // Slack calls response.text() to post — Voice falls back to the text field.
+        // This is the mechanism that makes TTS-enabled callbacks safe on Slack.
+        let response = ChannelResponse::Voice {
+            text: "Hello from TTS".to_string(),
+            audio: vec![0u8; 100],
+        };
+        assert_eq!(response.text(), "Hello from TTS");
+    }
+
+    #[test]
+    fn text_response_passes_through_unchanged() {
+        let response = ChannelResponse::Text("plain reply".to_string());
+        assert_eq!(response.text(), "plain reply");
+    }
+
+    #[tokio::test]
+    async fn on_message_returning_voice_exposes_text() {
+        // Even if a callback returns Voice (e.g. TTS-enabled), Slack should be
+        // able to extract the text via .text() without panicking.
+        let on_msg: SlackOnMessageFn =
+            Arc::new(|_ch, _uid, _user, _text, _is_group, _file, _delta_tx| {
+                Box::pin(async {
+                    Ok(ChannelResponse::Voice {
+                        text: "synthesized reply".to_string(),
+                        audio: vec![0xDE, 0xAD],
+                    })
+                })
+            });
+
+        let result = on_msg(
+            "C123".to_string(),
+            "U456".to_string(),
+            "user".to_string(),
+            "speak".to_string(),
+            false,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        // Slack handler calls result.text() — must be the text field, not the audio.
+        assert_eq!(result.text(), "synthesized reply");
+    }
 }
