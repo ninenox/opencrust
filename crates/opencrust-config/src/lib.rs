@@ -1,5 +1,6 @@
 pub mod loader;
 pub mod model;
+pub mod providers;
 pub mod watcher;
 
 pub use loader::ConfigLoader;
